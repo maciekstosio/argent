@@ -1,0 +1,21 @@
+---
+sidebar_position: 10
+sidebar_label: iOS launch performance
+title: iOS launch performance
+sidebar_custom_props:
+  icon: gauge
+---
+
+Argent can measure an iOS app launch and record an Xcode Instruments App Launch trace. Argent builds the app in Release for both tasks. Select a connected iPhone for device measurements.
+
+The launch measurement uses an Argent UI test runner. The runner measures five launches to the first frame. Argent keeps the app project unchanged.
+
+The Instruments recording shows launch phases, dynamic library loading, and sampled work on the main thread. Argent returns a table with the time and likely source for each finding. Some system work has no reliable source file. Argent marks those sources as unknown and reports confidence.
+
+Argent prepares a warm launch before each task. A warm launch starts a new app process after the app has already run on the device. This measurement does not describe a cold launch or a resume from the background.
+
+Measure on a physical iPhone when you need device performance. A simulator uses Mac hardware, so its timings can differ from iPhone timings. Argent uses a simulator only when you allow it.
+
+Argent saves each run under `.argent/traces/<datetime>/` in the app project. The measurement keeps its Xcode result and logs. The Instruments run keeps the trace, exports, and findings.
+
+See the [tools reference](/docs/reference/tools#ios-launch-performance) for parameters and signing behavior.

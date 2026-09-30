@@ -85,6 +85,8 @@ import { flowFinishRecordingTool } from "../tools/flows/flow-finish-recording";
 import { createRunFlowTool } from "../tools/flows/flow-run";
 import { flowReadPrerequisiteTool } from "../tools/flows/flow-read-prerequisite";
 import { gatherWorkspaceDataTool } from "../tools/workspace/gather-workspace-data";
+import { createIosLaunchMeasureTool } from "../tools/ios-launch/ios-launch-measure";
+import { iosLaunchProfileTool } from "../tools/ios-launch/ios-launch-profile";
 import { updateArgentTool } from "../tools/system/update-argent";
 import { dismissUpdateTool } from "../tools/system/dismiss-update";
 import { createScreenshotDiffTool } from "../tools/screenshot-diff";
@@ -183,6 +185,8 @@ export function createRegistry(): Registry {
   registry.registerTool(profilerCombinedReportTool);
   registry.registerTool(profilerLoadTool);
   registry.registerTool(gatherWorkspaceDataTool);
+  registry.registerTool(createIosLaunchMeasureTool(registry));
+  registry.registerTool(iosLaunchProfileTool);
   registry.registerTool(nativeDevtoolsStatusTool);
   registry.registerTool(nativeNetworkLogsTool);
   registry.registerTool(nativeFindViewsTool);

@@ -40,7 +40,7 @@ Argent drives a foldable iOS simulator, for example the iPhone Duo. `list-device
 - Unfolded, the UI is landscape. `rotate` sets the orientation of the device, not of the UI. `Portrait` gives a landscape UI.
 - If Argent cannot find the active panel, it uses the cover panel. The tool result then has a warning.
 
-Argent supports physical iPhones; physical iPads are not supported yet. `list-devices` shows a physical device as an iOS entry with kind `device`. The state is `connected` only while the device is attached by USB cable; Argent controls physical devices over the cable and does not use Wi-Fi. The state is `paired` when the device is paired but not reachable now. Argent never selects a physical device automatically: name its udid. A `paired` device cannot be driven until it is connected by cable again. See [Physical iOS devices](/docs/features/physical-ios-devices) for the requirements, the signing model, and the app-scoped interaction contract.
+Argent supports physical iPhones; physical iPads are not supported yet. `list-devices` shows a physical device as an iOS entry with kind `device`. The state is `connected` only while the device is attached by USB cable; Argent controls physical devices over the cable and does not use Wi-Fi. The state is `paired` when the device is paired but not reachable now. Argent does not select a physical device automatically: name its udid. A `paired` device cannot be driven until it is connected by cable again. See [Physical iOS devices](/docs/features/physical-ios-devices) for the requirements, the signing model, and the app-scoped interaction contract.
 
 ## Inspecting the screen
 
@@ -123,6 +123,25 @@ Argent supports physical iPhones; physical iPads are not supported yet. `list-de
 | `profiler-commit-query`           | Query React commit data for iterative render investigation                   |
 | `profiler-cpu-query`              | Query Hermes CPU profile data with targeted modes                            |
 | `profiler-stack-query`            | Query native trace data for iterative native investigation                   |
+
+## iOS launch performance
+
+| Tool                 | Description                                                          |
+| -------------------- | -------------------------------------------------------------------- |
+| `ios-launch-measure` | Build in Release and measure five warm launches with XCTest          |
+| `ios-launch-profile` | Build in Release and record a warm App Launch trace with Instruments |
+
+Both tools accept `workspace_path`, an absolute path to the app project root. Argent finds one `.xcworkspace` or `.xcodeproj` at the root or in `ios/`. Set `xcode_container` to select a different workspace or project inside the root. Set `scheme` when Xcode lists more than one scheme. Argent stops when the scheme has multiple app targets.
+
+Both tools require `device_id` to select a connected iPhone. Set `allow_simulator: true` to use a booted simulator when no selected iPhone is available. Simulator timings use Mac hardware. Both tools build the app in Release with its original bundle ID. Argent tries automatic signing and waits briefly for device unlock or trust actions. If the original bundle ID cannot be provisioned, Argent stops and reports the signing error.
+
+`ios-launch-measure` builds the Argent UI test runner in Release. The runner uses `XCTApplicationLaunchMetric` for five launch-to-first-frame samples. The result includes `averageMs`, `samplesMs`, and the `.xcresult` path. The optional `runner_test_bundle_id` selects an existing UI test bundle ID. It does not change the runner host app ID, so it may not resolve a free-team app-slot limit. Argent does not remove an app to free a slot.
+
+If Argent already has an active UI test runner on the selected iPhone, `ios-launch-measure` stops before the build. Run `stop-simulator-server` for that device, then retry the measurement.
+
+`ios-launch-profile` accepts `duration_seconds` from 5 to 60, with a default of 8. It records with the Instruments App Launch template. The result includes the `.trace` path, a Markdown findings table, and any export errors. Each finding gives a comment, time, source spot, and confidence. Argent limits loader and CPU findings to the first-frame boundary from the lifecycle trace. If that boundary is missing, Argent reports it and omits those findings. Lifecycle and loader times are wall intervals. CPU times are inclusive sampled weights; do not add them together.
+
+Both tools prepare a warm launch: the app runs once, then the next launch starts a new process. The tools report `launchState: warm`. They do not measure a cold launch or a background resume. Argent saves logs and results under `<workspace_path>/.argent/traces/<datetime>/`. It reuses DerivedData under `<workspace_path>/.argent/build-cache/ios-launch/` and `ios-launch-runner/`. See [iOS launch performance](/docs/features/ios-launch-performance).
 
 ## Flows
 
