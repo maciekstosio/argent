@@ -1,7 +1,7 @@
 import XCTest
 
 final class ArgentLaunchPerformanceTests: XCTestCase {
-    func testLaunchToFirstFrame() {
+    func testLaunchDuration() {
         guard let bundleID = ProcessInfo.processInfo.environment["ARGENT_LAUNCH_BUNDLE_ID"],
             !bundleID.isEmpty
         else {
@@ -12,8 +12,6 @@ final class ArgentLaunchPerformanceTests: XCTestCase {
         let options = XCTMeasureOptions()
         options.iterationCount = 5
         let app = XCUIApplication(bundleIdentifier: bundleID)
-        app.launch()
-        app.terminate()
 
         measure(metrics: [XCTApplicationLaunchMetric()], options: options) {
             app.launch()
