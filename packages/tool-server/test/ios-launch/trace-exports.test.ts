@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  cpuTableXpath,
   launchEndNs,
   parseLifecyclePhases,
   truncateCpuXml,
@@ -67,8 +68,9 @@ const CPU = `<?xml version="1.0"?>
 
 describe("truncateCpuXml", () => {
   it("keeps rows up to the launch end as XML the CPU parser still reads", () => {
-    const { xml, keptRows } = truncateCpuXml(CPU, 305_000_000);
+    const { xml, keptRows, laterRows } = truncateCpuXml(CPU, 305_000_000);
     expect(keptRows).toBe(2);
+    expect(laterRows).toBe(0);
     expect(xml).not.toContain("AfterFirstFrame");
     expect(xml.endsWith("</node></trace-query-result>")).toBe(true);
     const samples = parseCpuXml(xml);
@@ -79,6 +81,49 @@ describe("truncateCpuXml", () => {
   });
 
   it("returns the input unchanged when every row is inside the window", () => {
-    expect(truncateCpuXml(CPU, 500_000_000)).toEqual({ xml: CPU, keptRows: 3 });
+    expect(truncateCpuXml(CPU, 500_000_000)).toEqual({ xml: CPU, keptRows: 3, laterRows: 0 });
+  });
+
+  it("drops no launch sample when rows are out of time order", () => {
+    // A late in-window row after a post-launch row: cutting at the first
+    // post-launch row would lose it, so the cut moves past it instead.
+    const unsorted = CPU.replace(
+      "</node>",
+      `<row><sample-time id="11">250000000</sample-time><thread ref="2"/><weight ref="3"/><tagged-backtrace ref="4"/></row>\n` +
+        `<row><sample-time id="12">500000000</sample-time><thread ref="2"/><weight ref="3"/><tagged-backtrace ref="9"/></row>\n</node>`
+    );
+    const { xml, keptRows, laterRows } = truncateCpuXml(unsorted, 305_000_000);
+    expect(keptRows).toBe(3);
+    expect(laterRows).toBe(1);
+    expect(parseCpuXml(xml).map((s) => s.timestampNs)).toEqual([
+      100_000_000, 200_000_000, 400_000_000, 250_000_000,
+    ]);
+  });
+
+  it("keeps no rows when every sample is after the launch", () => {
+    const { xml, keptRows } = truncateCpuXml(CPU, 50_000_000);
+    expect(keptRows).toBe(0);
+    expect(parseCpuXml(xml)).toEqual([]);
+  });
+});
+
+describe("cpuTableXpath", () => {
+  it("selects the running-only table when the TOC marks it", () => {
+    const toc =
+      '<table target-pid="SINGLE" schema="time-profile" record-waiting-threads="0"/>' +
+      '<table target-pid="SINGLE" schema="time-profile" record-waiting-threads="1"/>';
+    expect(cpuTableXpath(toc)).toBe(
+      '/trace-toc/run[@number="1"]/data/table[@schema="time-profile" and @record-waiting-threads="0"]'
+    );
+  });
+
+  it("falls back to the first time-profile table without the attribute", () => {
+    expect(cpuTableXpath('<table schema="time-profile" target-pid="SINGLE"/>')).toBe(
+      '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"][1]'
+    );
+  });
+
+  it("returns null without a time-profile table", () => {
+    expect(cpuTableXpath('<table schema="time-sample"/>')).toBeNull();
   });
 });

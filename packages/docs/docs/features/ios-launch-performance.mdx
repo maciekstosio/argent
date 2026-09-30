@@ -16,6 +16,6 @@ Argent prepares a warm launch before each task. A warm launch starts a new app p
 
 Measure on a physical iPhone when you need device performance. A simulator uses Mac hardware, so its timings can differ from iPhone timings. Argent uses a simulator only when you allow it.
 
-Argent saves each run under `.argent/traces/<datetime>/` in the app project. The measurement keeps its Xcode result and logs. The Instruments run keeps the trace and its exports.
+Argent saves each run under `.argent/traces/<datetime>/` in the app project. The measurement keeps its Xcode result and logs. The Instruments run keeps the trace and its lifecycle and dyld exports. Argent keeps the CPU samples of the launch in the native profiler session.
 
 See the [tools reference](/docs/reference/tools#ios-launch-performance) for parameters and signing behavior.

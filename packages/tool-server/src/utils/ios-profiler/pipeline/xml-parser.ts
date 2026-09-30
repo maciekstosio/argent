@@ -66,6 +66,15 @@ export function parseCpuXml(xml: string, targetPid: number | null = null): CpuSa
     }
   }
 
+  // Rows sampled at the same instant as an earlier row (another thread) reference
+  // its sample-time. Skipping them would also skip the backtraces they define.
+  const sampleTimeRegistry = new Map<string, number>();
+  const sampleTimeDefRe = /<sample-time\s+id="(\d+)"[^>]*>(\d+)<\/sample-time>/g;
+  let sm;
+  while ((sm = sampleTimeDefRe.exec(xml)) !== null) {
+    sampleTimeRegistry.set(sm[1], parseInt(sm[2], 10));
+  }
+
   const rows = extractRows(xml);
 
   for (const row of rows) {
@@ -75,8 +84,7 @@ export function parseCpuXml(xml: string, targetPid: number | null = null): CpuSa
     if (sampleTimeMatch) {
       timestampNs = parseInt(sampleTimeMatch[1], 10);
     } else if (sampleTimeRef) {
-      // No sample-time ref registry; the second pass skips these rows too.
-      continue;
+      timestampNs = sampleTimeRegistry.get(sampleTimeRef[1]) ?? 0;
     }
 
     const threadMatch = row.match(/<thread[^>]*\sfmt="([^"]*)"[^>]*>/);
@@ -124,10 +132,6 @@ export function parseCpuXml(xml: string, targetPid: number | null = null): CpuSa
   let sampleIdx = 0;
   for (const row of rows) {
     if (sampleIdx >= samples.length) break;
-
-    // Skip rows that were skipped in the first pass
-    const sampleTimeRef = row.match(/<sample-time\s+ref="(\d+)"\s*\/>/);
-    if (sampleTimeRef) continue;
 
     const sample = samples[sampleIdx]!;
 

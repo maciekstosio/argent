@@ -11,6 +11,7 @@ import {
   terminateForWarmLaunch,
 } from "../../utils/ios-launch/workflow";
 import {
+  cpuTableXpath,
   launchEndNs,
   parseLifecyclePhases,
   truncateCpuXml,
@@ -50,13 +51,8 @@ const fileInputs: FileInputSpec[] = [
   { target: "workspace_path", path: "${workspace_path}", kind: "directory" },
 ];
 
-// The App Launch template holds two time-profile tables with the same running
-// samples; the second adds waiting-thread samples. Selecting one avoids double counting.
-const EXPORTS = {
-  lifecycle: { schema: "life-cycle-period", filter: "" },
-  dyld: { schema: "dyld-activity-interval", filter: "" },
-  cpu: { schema: "time-profile", filter: ' and @record-waiting-threads="0"' },
-} as const;
+const TABLE_XPATH = (schema: string) =>
+  `/trace-toc/run[@number="1"]/data/table[@schema="${schema}"]`;
 
 function profilerSessionId(): string {
   // Same shape as native-profiler-start, so profiler-load lists and loads it.
@@ -128,8 +124,8 @@ export const iosLaunchProfileTool: ToolDefinition<z.infer<typeof schema>, unknow
       throw new Error(`xctrace finished without a trace at ${tracePath}; see ${recordLog}.`);
     }
     const exportErrors: Record<string, string> = {};
-    const exported: Partial<Record<keyof typeof EXPORTS, string>> = {};
-    let schemas: string[] = [];
+    const exported: Partial<Record<"lifecycle" | "dyld" | "cpu", string>> = {};
+    let toc = "";
     try {
       const { stdout } = await execFileAsync(
         "xcrun",
@@ -137,33 +133,33 @@ export const iosLaunchProfileTool: ToolDefinition<z.infer<typeof schema>, unknow
         { timeout: 120_000, maxBuffer: 4 * 1024 * 1024, signal: ctx?.signal }
       );
       await fsp.writeFile(path.join(context.runDir, "toc.xml"), stdout);
-      schemas = [...stdout.matchAll(/schema="([^"]+)"/g)].map((match) => match[1]!);
+      toc = stdout;
     } catch (error) {
       ctx?.signal?.throwIfAborted();
       exportErrors.toc = error instanceof Error ? error.message : String(error);
     }
-    for (const [key, { schema: schemaName, filter }] of Object.entries(EXPORTS) as Array<
-      [keyof typeof EXPORTS, (typeof EXPORTS)[keyof typeof EXPORTS]]
+    const xpaths = {
+      lifecycle: toc.includes('schema="life-cycle-period"')
+        ? TABLE_XPATH("life-cycle-period")
+        : null,
+      dyld: toc.includes('schema="dyld-activity-interval"')
+        ? TABLE_XPATH("dyld-activity-interval")
+        : null,
+      cpu: cpuTableXpath(toc),
+    };
+    for (const [key, xpath] of Object.entries(xpaths) as Array<
+      [keyof typeof xpaths, string | null]
     >) {
       ctx?.signal?.throwIfAborted();
-      if (!schemas.includes(schemaName)) {
-        exportErrors[key] = `Trace does not contain ${schemaName}.`;
+      if (!xpath) {
+        exportErrors[key] = "Trace TOC has no table for this export.";
         continue;
       }
       const output = path.join(context.runDir, `${key}.xml`);
       try {
         await runLogged(
           "xcrun",
-          [
-            "xctrace",
-            "export",
-            "--input",
-            tracePath,
-            "--output",
-            output,
-            "--xpath",
-            `/trace-toc/run[@number="1"]/data/table[@schema="${schemaName}"${filter}]`,
-          ],
+          ["xctrace", "export", "--input", tracePath, "--output", output, "--xpath", xpath],
           {
             cwd: params.workspace_path,
             logPath: path.join(context.runDir, `xctrace-export-${key}.log`),
@@ -191,6 +187,7 @@ export const iosLaunchProfileTool: ToolDefinition<z.infer<typeof schema>, unknow
     let sessionId: string | null = null;
     let cpuXmlPath: string | null = null;
     let cpuSamples: number | null = null;
+    let laterRows = 0;
     if (exported.cpu) {
       const cpuXml = await fsp.readFile(exported.cpu, "utf8");
       const cut = endNs === null ? null : truncateCpuXml(cpuXml, endNs);
@@ -201,13 +198,14 @@ export const iosLaunchProfileTool: ToolDefinition<z.infer<typeof schema>, unknow
       await fsp.rm(exported.cpu, { force: true });
       delete exported.cpu;
       cpuSamples = cut?.keptRows ?? null;
+      laterRows = cut?.laterRows ?? 0;
     }
 
     const launchPhases = phases.filter((phase) => endNs === null || phase.startNs < endNs);
     ctx?.emitProgress?.({ type: "artifact", tracePath });
     return {
-      configuration: "Release",
-      launchState: "warm",
+      // Process start (first lifecycle phase) to the end of the first frame.
+      launchMs: endNs === null || phases.length === 0 ? null : ms(endNs - phases[0]!.startNs),
       device: { id: context.deviceId, name: context.deviceName, simulator: context.simulator },
       bundleId: context.bundleId,
       // Trace-relative ms, the same clock as CPU sample times.
@@ -222,7 +220,8 @@ export const iosLaunchProfileTool: ToolDefinition<z.infer<typeof schema>, unknow
           sessionId,
           cpuXml: cpuXmlPath,
           cpuSamples,
-          next: `profiler-load mode=load_native session_id=${sessionId} device_id=${context.deviceId}, then profiler-stack-query`,
+          ...(laterRows > 0 && { postLaunchSamplesKept: laterRows }),
+          next: `profiler-load mode=load_native session_id=${sessionId} device_id=${context.deviceId}, then profiler-stack-query mode=thread_breakdown thread="Main Thread" device_id=${context.deviceId}`,
         },
       }),
       ...(Object.keys(exportErrors).length > 0 && { exportErrors }),

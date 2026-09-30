@@ -194,8 +194,6 @@ export function createIosLaunchMeasureTool(
         );
       }
       return {
-        configuration: "Release",
-        launchState: "warm",
         metric: "XCTApplicationLaunchMetric",
         device: { id: context.deviceId, name: context.deviceName, simulator: context.simulator },
         bundleId: context.bundleId,

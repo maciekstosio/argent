@@ -64,24 +64,49 @@ export function launchEndNs(phases: LifecyclePhase[]): number | null {
 }
 
 /**
- * Drops `time-profile` rows sampled after `endNs`. xctrace writes rows in time
- * order and refs only point back to earlier rows, so cutting the tail keeps
- * every remaining ref resolvable.
+ * Keeps `time-profile` rows up to the last sample inside the launch. Refs only
+ * point back to earlier rows, so cutting the tail keeps every remaining ref
+ * resolvable. Cutting after the LAST in-window row, not before the first
+ * out-of-window one, drops no launch sample even if rows are out of time order;
+ * `laterRows` counts post-launch rows kept before the cut in that case.
  */
-export function truncateCpuXml(xml: string, endNs: number): { xml: string; keptRows: number } {
+export function truncateCpuXml(
+  xml: string,
+  endNs: number
+): { xml: string; keptRows: number; laterRows: number } {
   const registry = valueRegistry(xml, ["sample-time"]);
-  const rowRe = /<row>.*?<\/row>/gs;
   let keptRows = 0;
+  let laterRows = 0;
+  let laterSinceLastKept = 0;
   let cutAt: number | null = null;
-  for (const match of xml.matchAll(rowRe)) {
+  for (const match of xml.matchAll(/<row>.*?<\/row>/gs)) {
+    cutAt ??= match.index!;
     const time = rowValue(match[0], "sample-time", registry);
     if (time !== null && Number(time) > endNs) {
-      cutAt = match.index!;
-      break;
+      laterSinceLastKept++;
+      continue;
     }
     keptRows++;
+    laterRows += laterSinceLastKept;
+    laterSinceLastKept = 0;
+    cutAt = match.index! + match[0].length;
   }
-  if (cutAt === null) return { xml, keptRows };
+  if (cutAt === null || laterSinceLastKept === 0) return { xml, keptRows, laterRows };
   const tail = xml.slice(xml.lastIndexOf("</row>") + "</row>".length);
-  return { xml: xml.slice(0, cutAt) + tail, keptRows };
+  return { xml: xml.slice(0, cutAt) + tail, keptRows, laterRows };
+}
+
+/**
+ * XPath for the CPU samples. The App Launch template writes two time-profile
+ * tables with the same running samples, the second adding waiting threads, so
+ * exporting both would double count. Picks the running-only table when the TOC
+ * marks it, else the first time-profile table.
+ */
+export function cpuTableXpath(tocXml: string): string | null {
+  const tables = [...tocXml.matchAll(/<table\s[^>]*schema="time-profile"[^>]*>/g)].map((m) => m[0]);
+  if (tables.length === 0) return null;
+  const base = '/trace-toc/run[@number="1"]/data/table';
+  return tables.some((table) => /record-waiting-threads="0"/.test(table))
+    ? `${base}[@schema="time-profile" and @record-waiting-threads="0"]`
+    : `${base}[@schema="time-profile"][1]`;
 }

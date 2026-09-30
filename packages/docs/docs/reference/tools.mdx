@@ -141,14 +141,15 @@ If Argent already has an active UI test runner on the selected iPhone, `ios-laun
 
 `ios-launch-profile` accepts `duration_seconds` from 5 to 60, with a default of 8. It records with the Instruments App Launch template. Argent ends the launch at the end of the `Launching - Initial Frame Rendering` phase. The result includes these fields:
 
-- `phases`: the lifecycle phases before the first frame, in trace-relative milliseconds.
-- `firstFrameEndMs`: the end of the launch on the same clock.
+- `launchMs`: the time from the start of the app process to the end of the first frame.
+- `phases`: the lifecycle phases before the first frame, in milliseconds from the start of the trace.
+- `firstFrameEndMs`: the end of the launch, in milliseconds from the start of the trace.
 - `tracePath` and `exports`: the `.trace` bundle and the lifecycle and dyld XML exports.
-- `profilerSession`: a native profiler session with the CPU samples up to the first frame.
+- `profilerSession`: a native profiler session with the CPU samples up to the first frame, and the path of its XML file.
 
-Load the session with `profiler-load` in `load_native` mode, then query it with `profiler-stack-query`. The session file is an xctrace XML export, so the agent can also read it directly. Work after the first frame, such as the JavaScript bundle of a React Native app, is not part of the launch. Use the React profiler for that work.
+Load the session with `profiler-load` in `load_native` mode. Then run `profiler-stack-query` in `thread_breakdown` mode with `thread: "Main Thread"` to see the hot functions. The session file is an xctrace XML export, so the agent can also read it directly. Work after the first frame, such as the JavaScript bundle of a React Native app, is not part of the launch. Use the React profiler for that work.
 
-Both tools prepare a warm launch: the app runs once, then the next launch starts a new process. The tools report `launchState: warm`. They do not measure a cold launch or a background resume. Argent saves logs and results under `<workspace_path>/.argent/traces/<datetime>/`. It reuses DerivedData under `<workspace_path>/.argent/build-cache/ios-launch/` and `ios-launch-runner/`. See [iOS launch performance](/docs/features/ios-launch-performance).
+Both tools prepare a warm launch: the app runs once, then the next launch starts a new process. They do not measure a cold launch or a background resume. Argent saves logs and results under `<workspace_path>/.argent/traces/<datetime>/`. It reuses DerivedData under `<workspace_path>/.argent/build-cache/ios-launch/` and `ios-launch-runner/`. See [iOS launch performance](/docs/features/ios-launch-performance).
 
 ## Flows
 
