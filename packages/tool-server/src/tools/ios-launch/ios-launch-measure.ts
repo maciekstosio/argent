@@ -69,7 +69,7 @@ export function createIosLaunchMeasureTool(
       failedMsg: ({ failureSignal }) => `Failed to measure iOS launch: ${failureSignal.error_code}`,
     },
     description:
-      "Build an iOS app and Argent's XCUITest runner in Release, then measure five warm launches on a connected iPhone using XCTApplicationLaunchMetric. Results and build logs go to <workspace>/.argent/traces/<datetime>. The metric ends at the first frame, not app content readiness. A simulator is used only with allow_simulator=true and its timings are not representative of an iPhone. Does not edit the app project.",
+      "Build an iOS app and Argent's XCUITest runner in Release, then measure five warm launches on a connected iPhone using XCTApplicationLaunchMetric. Results and build logs go to <workspace>/.argent/traces/<datetime>. Apple's metric includes the first frame and extended launch tasks. A simulator is used only with allow_simulator=true and its timings are not representative of an iPhone. Does not edit the app project.",
     zodSchema: schema,
     fileInputs,
     services: () => ({}),
@@ -204,7 +204,7 @@ export function createIosLaunchMeasureTool(
       return {
         configuration: "Release",
         launchState: "warm",
-        metric: "first frame",
+        metric: "XCTApplicationLaunchMetric",
         device: { id: context.deviceId, name: context.deviceName, simulator: context.simulator },
         bundleId: context.bundleId,
         averageMs: Math.round(

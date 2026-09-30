@@ -8,7 +8,7 @@ sidebar_custom_props:
 
 Argent can measure an iOS app launch and record an Xcode Instruments App Launch trace. Argent builds the app in Release for both tasks. Select a connected iPhone for device measurements.
 
-The launch measurement uses an Argent UI test runner. The runner measures five launches to the first frame. Argent keeps the app project unchanged.
+The launch measurement uses an Argent UI test runner. The runner measures five launches with Apple's application launch metric. Argent keeps the app project unchanged.
 
 The Instruments recording shows launch phases, dynamic library loading, and sampled work on the main thread. Argent returns a table with the time and likely source for each finding. Some system work has no reliable source file. Argent marks those sources as unknown and reports confidence.
 

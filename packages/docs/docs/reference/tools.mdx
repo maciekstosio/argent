@@ -135,7 +135,7 @@ Both tools accept `workspace_path`, an absolute path to the app project root. Ar
 
 Both tools require `device_id` to select a connected iPhone. Set `allow_simulator: true` to use a booted simulator when no selected iPhone is available. Simulator timings use Mac hardware. Both tools build the app in Release with its original bundle ID. Argent tries automatic signing and waits briefly for device unlock or trust actions. If the original bundle ID cannot be provisioned, Argent stops and reports the signing error.
 
-`ios-launch-measure` builds the Argent UI test runner in Release. The runner uses `XCTApplicationLaunchMetric` for five launch-to-first-frame samples. The result includes `averageMs`, `samplesMs`, and the `.xcresult` path. The optional `runner_test_bundle_id` selects an existing UI test bundle ID. It does not change the runner host app ID, so it may not resolve a free-team app-slot limit. Argent does not remove an app to free a slot.
+`ios-launch-measure` builds the Argent UI test runner in Release. The runner uses `XCTApplicationLaunchMetric` for five samples. Apple's metric includes the first frame and extended launch tasks. The result includes `averageMs`, `samplesMs`, and the `.xcresult` path. The optional `runner_test_bundle_id` selects an existing UI test bundle ID. It does not change the runner host app ID, so it may not resolve a free-team app-slot limit. Argent does not remove an app to free a slot.
 
 If Argent already has an active UI test runner on the selected iPhone, `ios-launch-measure` stops before the build. Run `stop-simulator-server` for that device, then retry the measurement.
 
