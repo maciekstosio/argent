@@ -500,7 +500,11 @@ Fails if the session_id is not found or required XML files are missing from disk
   zodSchema,
   // The Hermes, xctrace and perfetto formats this loads have no Chromium
   // equivalent; the gate fails at the call site, not inside the trace parser.
-  capability: RN_ONLY_TOOL_CAPABILITY,
+  // Physical iPhones load the xctrace sessions ios-launch-profile writes.
+  capability: {
+    ...RN_ONLY_TOOL_CAPABILITY,
+    apple: { ...RN_ONLY_TOOL_CAPABILITY.apple, device: true },
+  },
   services: (params) => {
     const svcs: Record<string, ServiceRef> = {};
     if (params.mode === "load_native") {

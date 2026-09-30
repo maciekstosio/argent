@@ -10,7 +10,12 @@ import {
   runLogged,
   terminateForWarmLaunch,
 } from "../../utils/ios-launch/workflow";
-import { analyzeAppLaunchExports, renderLaunchFindings } from "../../utils/ios-launch/analyze";
+import {
+  launchEndNs,
+  parseLifecyclePhases,
+  truncateCpuXml,
+} from "../../utils/ios-launch/trace-exports";
+import { getDebugDir } from "../../utils/react-profiler/debug/dump";
 
 const execFileAsync = promisify(execFile);
 
@@ -45,25 +50,37 @@ const fileInputs: FileInputSpec[] = [
   { target: "workspace_path", path: "${workspace_path}", kind: "directory" },
 ];
 
+// The App Launch template holds two time-profile tables with the same running
+// samples; the second adds waiting-thread samples. Selecting one avoids double counting.
 const EXPORTS = {
-  lifecycle: "life-cycle-period",
-  dyld: "dyld-activity-interval",
-  cpu: "time-profile",
+  lifecycle: { schema: "life-cycle-period", filter: "" },
+  dyld: { schema: "dyld-activity-interval", filter: "" },
+  cpu: { schema: "time-profile", filter: ' and @record-waiting-threads="0"' },
 } as const;
+
+function profilerSessionId(): string {
+  // Same shape as native-profiler-start, so profiler-load lists and loads it.
+  return new Date()
+    .toISOString()
+    .replace(/[-:T]/g, (m) => (m === "T" ? "-" : ""))
+    .slice(0, 15);
+}
+
+const ms = (ns: number) => Math.round(ns / 100_000) / 10;
 
 export const iosLaunchProfileTool: ToolDefinition<z.infer<typeof schema>, unknown> = {
   id: "ios-launch-profile",
   longRunning: true,
-  searchHint: "iOS iPhone app launch Instruments xctrace trace startup weak spots Release",
+  searchHint: "iOS iPhone app launch Instruments xctrace trace startup first frame Release",
   capability: { apple: { device: true, simulator: true } },
   interaction: {
     startedMsg: () => "Recording iOS App Launch in Release",
-    completedMsg: () => "Recorded and analyzed iOS App Launch",
+    completedMsg: () => "Recorded iOS App Launch",
     failedMsg: ({ failureSignal }) =>
       `Failed to record iOS App Launch: ${failureSignal.error_code}`,
   },
   description:
-    "Build an iOS app in Release, warm-launch it on a physical iPhone under Xcode Instruments' App Launch template, and report lifecycle, dyld, and main-thread sample hotspots. Saves the raw .trace and exports under <workspace>/.argent/traces/<datetime>. Source locations are shown only when uniquely inferred from repository source; otherwise spot is unknown. A simulator requires explicit allow_simulator=true.",
+    "Build an iOS app in Release, warm-launch it on a physical iPhone under Xcode Instruments' App Launch template, and return the launch phases up to the first frame. Saves the .trace and XML exports (lifecycle, dyld) under <workspace>/.argent/traces/<datetime>, and the CPU samples up to the first frame as a native profiler session for profiler-load and profiler-stack-query. A simulator requires explicit allow_simulator=true.",
   zodSchema: schema,
   fileInputs,
   services: () => ({}),
@@ -125,8 +142,8 @@ export const iosLaunchProfileTool: ToolDefinition<z.infer<typeof schema>, unknow
       ctx?.signal?.throwIfAborted();
       exportErrors.toc = error instanceof Error ? error.message : String(error);
     }
-    for (const [key, schemaName] of Object.entries(EXPORTS) as Array<
-      [keyof typeof EXPORTS, string]
+    for (const [key, { schema: schemaName, filter }] of Object.entries(EXPORTS) as Array<
+      [keyof typeof EXPORTS, (typeof EXPORTS)[keyof typeof EXPORTS]]
     >) {
       ctx?.signal?.throwIfAborted();
       if (!schemas.includes(schemaName)) {
@@ -145,7 +162,7 @@ export const iosLaunchProfileTool: ToolDefinition<z.infer<typeof schema>, unknow
             "--output",
             output,
             "--xpath",
-            `/trace-toc/run[@number="1"]/data/table[@schema="${schemaName}"]`,
+            `/trace-toc/run[@number="1"]/data/table[@schema="${schemaName}"${filter}]`,
           ],
           {
             cwd: params.workspace_path,
@@ -161,37 +178,55 @@ export const iosLaunchProfileTool: ToolDefinition<z.infer<typeof schema>, unknow
       }
     }
     ctx?.signal?.throwIfAborted();
-    const findings = await analyzeAppLaunchExports(params.workspace_path, exported);
-    ctx?.signal?.throwIfAborted();
-    const reportPath = path.join(context.runDir, "findings.md");
-    const findingsTable = renderLaunchFindings(findings);
-    await fsp.writeFile(reportPath, findingsTable);
-    await fsp.writeFile(
-      path.join(context.runDir, "analysis.json"),
-      JSON.stringify(
-        {
-          configuration: "Release",
-          launchState: "warm",
-          tracePath,
-          exported,
-          exportErrors,
-          findings,
-        },
-        null,
-        2
-      )
-    );
-    ctx?.emitProgress?.({ type: "artifact", tracePath, reportPath });
+
+    const phases = exported.lifecycle
+      ? parseLifecyclePhases(await fsp.readFile(exported.lifecycle, "utf8"))
+      : [];
+    const endNs = launchEndNs(phases);
+    if (exported.lifecycle && endNs === null) {
+      exportErrors.lifecycle =
+        "Lifecycle export has no first-frame phase; CPU samples are not cut.";
+    }
+
+    let sessionId: string | null = null;
+    let cpuXmlPath: string | null = null;
+    let cpuSamples: number | null = null;
+    if (exported.cpu) {
+      const cpuXml = await fsp.readFile(exported.cpu, "utf8");
+      const cut = endNs === null ? null : truncateCpuXml(cpuXml, endNs);
+      sessionId = profilerSessionId();
+      cpuXmlPath = path.join(await getDebugDir(), `native-profiler-${sessionId}_raw_cpu.xml`);
+      await fsp.writeFile(cpuXmlPath, cut?.xml ?? cpuXml);
+      // The launch-window copy is the one to analyze; drop the full export.
+      await fsp.rm(exported.cpu, { force: true });
+      delete exported.cpu;
+      cpuSamples = cut?.keptRows ?? null;
+    }
+
+    const launchPhases = phases.filter((phase) => endNs === null || phase.startNs < endNs);
+    ctx?.emitProgress?.({ type: "artifact", tracePath });
     return {
       configuration: "Release",
       launchState: "warm",
       device: { id: context.deviceId, name: context.deviceName, simulator: context.simulator },
       bundleId: context.bundleId,
+      // Trace-relative ms, the same clock as CPU sample times.
+      firstFrameEndMs: endNs === null ? null : ms(endNs),
+      phases: launchPhases.map(
+        (phase) => `${ms(phase.startNs)}–${ms(phase.startNs + phase.durationNs)} ms ${phase.period}`
+      ),
       tracePath,
-      reportPath,
-      findingsTable,
-      exportErrors,
-      warning: context.warning,
+      exports: exported,
+      ...(sessionId && {
+        profilerSession: {
+          sessionId,
+          cpuXml: cpuXmlPath,
+          cpuSamples,
+          next: `profiler-load mode=load_native session_id=${sessionId} device_id=${context.deviceId}, then profiler-stack-query`,
+        },
+      }),
+      ...(Object.keys(exportErrors).length > 0 && { exportErrors }),
+      ...(context.warning && { warning: context.warning }),
     };
   },
 };

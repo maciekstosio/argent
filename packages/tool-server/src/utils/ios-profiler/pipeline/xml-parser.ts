@@ -164,20 +164,21 @@ function resolveBacktrace(
   backtraceRegistry: Map<string, StackFrame[]>,
   binaryRegistry: Map<string, { name: string; path: string }>
 ): StackFrame[] {
-  const btRefMatch = rowXml.match(/<backtrace\s+ref="(\d+)"\s*\/>/);
+  // Argent.tracetemplate exports `<backtrace>`; the App Launch template exports `<tagged-backtrace>`.
+  const btRefMatch = rowXml.match(/<(?:tagged-)?backtrace\s+ref="(\d+)"\s*\/>/);
   if (btRefMatch) {
     return backtraceRegistry.get(btRefMatch[1]) ?? [];
   }
 
-  const btMatch = rowXml.match(/<backtrace\s+id="(\d+)">(.*?)<\/backtrace>/s);
+  const btMatch = rowXml.match(/<((?:tagged-)?backtrace)\s+id="(\d+)">(.*?)<\/\1>/s);
   if (!btMatch) {
-    const btNoId = rowXml.match(/<backtrace>(.*?)<\/backtrace>/s);
+    const btNoId = rowXml.match(/<((?:tagged-)?backtrace)>(.*?)<\/\1>/s);
     if (!btNoId) return [];
-    return resolveFrames(btNoId[1], frameRegistry, binaryRegistry);
+    return resolveFrames(btNoId[2], frameRegistry, binaryRegistry);
   }
 
-  const btId = btMatch[1];
-  const frames = resolveFrames(btMatch[2], frameRegistry, binaryRegistry);
+  const btId = btMatch[2];
+  const frames = resolveFrames(btMatch[3], frameRegistry, binaryRegistry);
   backtraceRegistry.set(btId, frames);
   return frames;
 }

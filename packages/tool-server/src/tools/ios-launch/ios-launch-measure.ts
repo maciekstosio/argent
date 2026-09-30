@@ -39,10 +39,6 @@ const schema = z.object({
     .boolean()
     .default(false)
     .describe("Explicitly allow a booted simulator when no iPhone is selected."),
-  runner_test_bundle_id: z
-    .string()
-    .optional()
-    .describe("Explicit UI-test bundle ID to reuse; this does not change the runner host app ID."),
 });
 
 const fileInputs: FileInputSpec[] = [
@@ -69,7 +65,7 @@ export function createIosLaunchMeasureTool(
       failedMsg: ({ failureSignal }) => `Failed to measure iOS launch: ${failureSignal.error_code}`,
     },
     description:
-      "Build an iOS app and Argent's XCUITest runner in Release, then measure five warm launches on a connected iPhone using XCTApplicationLaunchMetric. Results and build logs go to <workspace>/.argent/traces/<datetime>. Apple's metric includes the first frame and extended launch tasks. A simulator is used only with allow_simulator=true and its timings are not representative of an iPhone. Does not edit the app project.",
+      "Build an iOS app and Argent's XCUITest runner in Release, then measure five warm launches on a connected iPhone using XCTApplicationLaunchMetric. Results and build logs go to <workspace>/.argent/traces/<datetime>. The default metric ends at the first frame, or later if the app registers extended launch tasks. A simulator is used only with allow_simulator=true and its timings are not representative of an iPhone. Does not edit the app project.",
     zodSchema: schema,
     fileInputs,
     services: () => ({}),
@@ -109,13 +105,9 @@ export function createIosLaunchMeasureTool(
         (message) => ctx?.emitProgress?.({ type: "device-action", message }),
         ctx?.signal
       );
-      const runnerTeamId = context.simulator
-        ? null
-        : (context.teamId ?? (await resolveRunnerSigningConfig()).teamId);
-      const testBundleId =
-        params.runner_test_bundle_id ??
-        `com.argent.runner.t${runnerTeamId?.toLowerCase() ?? "simulator"}.uitests`;
-      const runnerBundleId = `com.argent.runner.t${runnerTeamId?.toLowerCase() ?? "simulator"}`;
+      const runnerSigning = context.simulator ? null : await resolveRunnerSigningConfig();
+      const runnerBundleId = runnerSigning?.appBundleId ?? "com.argent.runner.tsimulator";
+      const testBundleId = runnerSigning?.testBundleId ?? `${runnerBundleId}.uitests`;
       const runnerBuildKey = createHash("sha256")
         .update([context.destination, runnerBundleId, testBundleId, "Release"].join("\n"))
         .digest("hex")
@@ -146,16 +138,16 @@ export function createIosLaunchMeasureTool(
         "NO",
         "-collect-test-diagnostics",
         "never",
-        "-only-testing:ArgentRunnerUITests/ArgentLaunchPerformanceTests/testLaunchToFirstFrame",
+        "-only-testing:ArgentRunnerUITests/ArgentLaunchPerformanceTests/testLaunchDuration",
         `ARGENT_RUNNER_APP_BUNDLE_ID=${runnerBundleId}`,
         `ARGENT_RUNNER_TEST_BUNDLE_ID=${testBundleId}`,
         "ENABLE_CODE_COVERAGE=NO",
         "ENABLE_DEBUG_DYLIB=NO",
-        ...(runnerTeamId
+        ...(runnerSigning
           ? [
               "-allowProvisioningUpdates",
               "-allowProvisioningDeviceRegistration",
-              `DEVELOPMENT_TEAM=${runnerTeamId}`,
+              `DEVELOPMENT_TEAM=${runnerSigning.teamId}`,
               "CODE_SIGN_STYLE=Automatic",
             ]
           : ["CODE_SIGNING_ALLOWED=NO"]),
@@ -175,8 +167,8 @@ export function createIosLaunchMeasureTool(
         if (message.includes("maximum number of installed apps using a free developer profile")) {
           throw new Error(
             "The iPhone's free developer profile has no slot for Argent's UI-test runner. " +
-              "Remove an app you choose or use a paid team. An existing runner_test_bundle_id may help only if the runner host app also has a slot. " +
-              `Argent did not remove another app. Log: ${runnerLog}`
+              "Remove an app you choose or use a paid team. Argent did not remove another app. " +
+              `Log: ${runnerLog}`
           );
         }
         throw error;

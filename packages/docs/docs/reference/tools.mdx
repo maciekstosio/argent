@@ -135,11 +135,18 @@ Both tools accept `workspace_path`, an absolute path to the app project root. Ar
 
 Both tools require `device_id` to select a connected iPhone. Set `allow_simulator: true` to use a booted simulator when no selected iPhone is available. Simulator timings use Mac hardware. Both tools build the app in Release with its original bundle ID. Argent tries automatic signing and waits briefly for device unlock or trust actions. If the original bundle ID cannot be provisioned, Argent stops and reports the signing error.
 
-`ios-launch-measure` builds the Argent UI test runner in Release. The runner uses `XCTApplicationLaunchMetric` for five samples. Apple's metric includes the first frame and extended launch tasks. The result includes `averageMs`, `samplesMs`, and the `.xcresult` path. The optional `runner_test_bundle_id` selects an existing UI test bundle ID. It does not change the runner host app ID, so it may not resolve a free-team app-slot limit. Argent does not remove an app to free a slot.
+`ios-launch-measure` builds the Argent UI test runner in Release. The runner uses `XCTApplicationLaunchMetric` for five samples. Apple's metric includes the first frame and extended launch tasks. The result includes `averageMs`, `samplesMs`, and the `.xcresult` path.
 
 If Argent already has an active UI test runner on the selected iPhone, `ios-launch-measure` stops before the build. Run `stop-simulator-server` for that device, then retry the measurement.
 
-`ios-launch-profile` accepts `duration_seconds` from 5 to 60, with a default of 8. It records with the Instruments App Launch template. The result includes the `.trace` path, a Markdown findings table, and any export errors. Each finding gives a comment, time, source spot, and confidence. Argent limits loader and CPU findings to the first-frame boundary from the lifecycle trace. If that boundary is missing, Argent reports it and omits those findings. Lifecycle and loader times are wall intervals. CPU times are inclusive sampled weights; do not add them together.
+`ios-launch-profile` accepts `duration_seconds` from 5 to 60, with a default of 8. It records with the Instruments App Launch template. Argent ends the launch at the end of the `Launching - Initial Frame Rendering` phase. The result includes these fields:
+
+- `phases`: the lifecycle phases before the first frame, in trace-relative milliseconds.
+- `firstFrameEndMs`: the end of the launch on the same clock.
+- `tracePath` and `exports`: the `.trace` bundle and the lifecycle and dyld XML exports.
+- `profilerSession`: a native profiler session with the CPU samples up to the first frame.
+
+Load the session with `profiler-load` in `load_native` mode, then query it with `profiler-stack-query`. The session file is an xctrace XML export, so the agent can also read it directly. Work after the first frame, such as the JavaScript bundle of a React Native app, is not part of the launch. Use the React profiler for that work.
 
 Both tools prepare a warm launch: the app runs once, then the next launch starts a new process. The tools report `launchState: warm`. They do not measure a cold launch or a background resume. Argent saves logs and results under `<workspace_path>/.argent/traces/<datetime>/`. It reuses DerivedData under `<workspace_path>/.argent/build-cache/ios-launch/` and `ios-launch-runner/`. See [iOS launch performance](/docs/features/ios-launch-performance).
 
