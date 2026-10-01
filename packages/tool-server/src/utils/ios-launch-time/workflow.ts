@@ -13,7 +13,8 @@ import {
 } from "../ios-device/devicectl";
 import { listIosSimulators } from "../ios-devices";
 import { simctlPrefix } from "../ios-device-sets";
-import { resolveRunnerSigningConfig, resolveSigningHint } from "../ios-device/runner-signing";
+import { resolveSigningHint } from "../ios-device/runner-signing";
+import { detectSigningTeams } from "../ios-device/team-detect";
 import { xcodebuildFailureSummary } from "../ios-device/runner-artifact";
 import { signalGroup } from "../process-kill";
 
@@ -375,6 +376,17 @@ export function appBuildArgs(
   ];
 }
 
+/**
+ * Team for an app project that sets none: ARGENT_IOS_TEAM_ID, else the newest
+ * team in this Mac's keychain. Null leaves signing to xcodebuild, whose failure
+ * carries a signing hint.
+ */
+async function detectAppTeam(): Promise<string | null> {
+  const envTeamId = process.env.ARGENT_IOS_TEAM_ID?.trim();
+  if (envTeamId) return envTeamId;
+  return (await detectSigningTeams())[0]?.teamId ?? null;
+}
+
 export async function prepareLaunch(
   request: LaunchRequest,
   onProgress?: (message: string) => void,
@@ -396,7 +408,7 @@ export async function prepareLaunch(
   await fsp.mkdir(runDir);
   const configuration = request.configuration ?? "Release";
   const buildKey = appBuildKey(container, scheme, device.destination, configuration);
-  const derivedDataPath = path.join(root, ".argent", "build-cache", "ios-launch", buildKey);
+  const derivedDataPath = path.join(root, ".argent", "build-cache", "ios-launch-time", buildKey);
   const settings = await appSettings(
     root,
     container,
@@ -409,10 +421,9 @@ export async function prepareLaunch(
   const configuredTeamId = settings.DEVELOPMENT_TEAM?.trim() || null;
   const manuallySigned = settings.CODE_SIGN_STYLE === "Manual";
   const detectedTeam =
-    device.simulator || configuredTeamId || manuallySigned
-      ? null
-      : await resolveRunnerSigningConfig();
-  const appTeamId = configuredTeamId ?? detectedTeam?.teamId ?? null;
+    device.simulator || configuredTeamId || manuallySigned ? null : await detectAppTeam();
+  if (detectedTeam) onProgress?.(`Signing the app with team ${detectedTeam}`);
+  const appTeamId = configuredTeamId ?? detectedTeam;
   const args = appBuildArgs(container, scheme, configuration, device.destination, derivedDataPath, [
     ...(device.simulator
       ? ["CODE_SIGNING_ALLOWED=NO"]
@@ -431,7 +442,8 @@ export async function prepareLaunch(
     throw new Error(
       `${configuration} build failed for the app's original bundle ID ${settings.PRODUCT_BUNDLE_IDENTIFIER}. ` +
         `If signing failed, set up this exact bundle ID for your Apple team in Xcode and retry. ` +
-        (error instanceof Error ? error.message : String(error))
+        (error instanceof Error ? error.message : String(error)),
+      { cause: error }
     );
   }
   const appPath = path.join(settings.TARGET_BUILD_DIR!, settings.FULL_PRODUCT_NAME!);

@@ -151,7 +151,7 @@ If Argent already has an active UI test runner on the selected iPhone, `ios-laun
 
 Load the session with `profiler-load` in `load_native` mode. Then run `profiler-stack-query` in `thread_breakdown` mode with `thread: "Main Thread"` to see the hot functions. The session file is an xctrace XML export, so the agent can also read it directly. Work after the first frame, such as the JavaScript bundle of a React Native app, is not part of the launch. Use the React profiler for that work.
 
-Both tools prepare a warm launch: the app runs once, then the next launch starts a new process. They do not measure a cold launch or a background resume. Argent saves logs and results under `<workspace_path>/.argent/traces/<datetime>/`. It reuses DerivedData under `<workspace_path>/.argent/build-cache/ios-launch/` and `ios-launch-runner/`. See [iOS launch performance](/docs/features/ios-launch-performance).
+Both tools prepare a warm launch: the app runs once, then the next launch starts a new process. They do not measure a cold launch or a background resume. Argent saves logs and results under `<workspace_path>/.argent/traces/<datetime>/`. It reuses DerivedData under `<workspace_path>/.argent/build-cache/ios-launch-time/` and `ios-launch-time-runner/`. See [iOS launch performance](/docs/features/ios-launch-performance).
 
 ## Flows
 

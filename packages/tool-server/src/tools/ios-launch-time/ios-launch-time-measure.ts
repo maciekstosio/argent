@@ -136,7 +136,7 @@ export function createIosLaunchTimeMeasureTool(
           params.workspace_path,
           ".argent",
           "build-cache",
-          "ios-launch-runner",
+          "ios-launch-time-runner",
           runnerBuildKey
         ),
         "-resultBundlePath",
@@ -175,7 +175,8 @@ export function createIosLaunchTimeMeasureTool(
           throw new Error(
             "The iPhone's free developer profile has no slot for Argent's UI-test runner. " +
               "Remove an app you choose or use a paid team. Argent did not remove another app. " +
-              `Log: ${runnerLog}`
+              `Log: ${runnerLog}`,
+            { cause: error }
           );
         }
         throw error;
