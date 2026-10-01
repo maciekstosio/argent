@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { FileInputSpec, ToolDefinition } from "@argent/registry";
 import {
   ensureLaunchDeviceReady,
-  prepareReleaseLaunch,
+  prepareLaunch,
   runLogged,
   terminateForWarmLaunch,
 } from "../../utils/ios-launch/workflow";
@@ -34,6 +34,11 @@ const schema = z.object({
     .string()
     .optional()
     .describe("Workspace or project path, relative to workspace_path."),
+  configuration: z
+    .string()
+    .min(1)
+    .default("Release")
+    .describe("Xcode build configuration for the app. Use an optimized, non-debug configuration."),
   allow_simulator: z
     .boolean()
     .default(false)
@@ -67,27 +72,28 @@ const ms = (ns: number) => Math.round(ns / 100_000) / 10;
 export const iosLaunchProfileTool: ToolDefinition<z.infer<typeof schema>, unknown> = {
   id: "ios-launch-profile",
   longRunning: true,
-  searchHint: "iOS iPhone app launch Instruments xctrace trace startup first frame Release",
+  searchHint: "iOS iPhone app launch Instruments xctrace trace startup first frame",
   capability: { apple: { device: true, simulator: true } },
   interaction: {
-    startedMsg: () => "Recording iOS App Launch in Release",
+    startedMsg: ({ params }) => `Recording iOS App Launch in ${params.configuration ?? "Release"}`,
     completedMsg: () => "Recorded iOS App Launch",
     failedMsg: ({ failureSignal }) =>
       `Failed to record iOS App Launch: ${failureSignal.error_code}`,
   },
   description:
-    "Build an iOS app in Release, warm-launch it on a physical iPhone under Xcode Instruments' App Launch template, and return the launch phases up to the first frame. Saves the .trace and XML exports (lifecycle, dyld) under <workspace>/.argent/traces/<datetime>, and the CPU samples up to the first frame as a native profiler session for profiler-load and profiler-stack-query. A simulator requires explicit allow_simulator=true.",
+    "Build an iOS app in the given configuration, warm-launch it on a physical iPhone under Xcode Instruments' App Launch template, and return the launch phases up to the first frame. Saves the .trace and XML exports (lifecycle, dyld) under <workspace>/.argent/traces/<datetime>, and the CPU samples up to the first frame as a native profiler session for profiler-load and profiler-stack-query. A simulator requires explicit allow_simulator=true.",
   zodSchema: schema,
   fileInputs,
   services: () => ({}),
   async execute(_services, params, ctx) {
-    const context = await prepareReleaseLaunch(
+    const context = await prepareLaunch(
       {
         workspacePath: params.workspace_path,
         deviceId: params.device_id,
         scheme: params.scheme,
         xcodeContainer: params.xcode_container,
         allowSimulator: params.allow_simulator,
+        configuration: params.configuration,
       },
       (message) => ctx?.emitProgress?.({ type: "device-action", message }),
       ctx?.signal

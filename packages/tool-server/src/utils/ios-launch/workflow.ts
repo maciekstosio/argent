@@ -26,6 +26,8 @@ export interface LaunchRequest {
   scheme?: string;
   xcodeContainer?: string;
   allowSimulator?: boolean;
+  /** Xcode configuration for the app. Defaults to "Release". */
+  configuration?: string;
 }
 
 export interface LaunchContext {
@@ -267,27 +269,65 @@ interface XcodeSettings {
   buildSettings: Record<string, string>;
 }
 
-async function appSettings(
-  root: string,
+export function showBuildSettingsArgs(
   container: string,
   scheme: string,
+  configuration: string,
   destination: string,
-  derivedDataPath: string,
-  signal?: AbortSignal
-): Promise<Record<string, string>> {
-  const args = [
+  derivedDataPath: string
+): string[] {
+  return [
     "-showBuildSettings",
     "-json",
     ...containerArgs(container),
     "-scheme",
     scheme,
     "-configuration",
-    "Release",
+    configuration,
     "-destination",
     destination,
     "-derivedDataPath",
     derivedDataPath,
   ];
+}
+
+export function assertResolvedConfiguration(
+  app: Record<string, string>,
+  configuration: string
+): void {
+  if (app.CONFIGURATION !== configuration) {
+    throw new Error(`Xcode did not resolve the app to ${configuration}.`);
+  }
+}
+
+export function appBuildKey(
+  container: string,
+  scheme: string,
+  destination: string,
+  configuration: string
+): string {
+  return createHash("sha256")
+    .update([container, scheme, destination, configuration].join("\n"))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+async function appSettings(
+  root: string,
+  container: string,
+  scheme: string,
+  configuration: string,
+  destination: string,
+  derivedDataPath: string,
+  signal?: AbortSignal
+): Promise<Record<string, string>> {
+  const args = showBuildSettingsArgs(
+    container,
+    scheme,
+    configuration,
+    destination,
+    derivedDataPath
+  );
   const settings = JSON.parse(
     await smallCommand("xcodebuild", args, root, signal)
   ) as XcodeSettings[];
@@ -298,7 +338,7 @@ async function appSettings(
     );
   }
   const app = apps[0]!.buildSettings;
-  if (app.CONFIGURATION !== "Release") throw new Error("Xcode did not resolve the app to Release.");
+  assertResolvedConfiguration(app, configuration);
   if (
     !app.PRODUCT_BUNDLE_IDENTIFIER ||
     !app.TARGET_BUILD_DIR ||
@@ -310,7 +350,32 @@ async function appSettings(
   return app;
 }
 
-export async function prepareReleaseLaunch(
+export function appBuildArgs(
+  container: string,
+  scheme: string,
+  configuration: string,
+  destination: string,
+  derivedDataPath: string,
+  extra: string[] = []
+): string[] {
+  return [
+    "build",
+    ...containerArgs(container),
+    "-scheme",
+    scheme,
+    "-configuration",
+    configuration,
+    "-destination",
+    destination,
+    "-derivedDataPath",
+    derivedDataPath,
+    "-allowProvisioningUpdates",
+    "-allowProvisioningDeviceRegistration",
+    ...extra,
+  ];
+}
+
+export async function prepareLaunch(
   request: LaunchRequest,
   onProgress?: (message: string) => void,
   signal?: AbortSignal
@@ -329,15 +394,14 @@ export async function prepareReleaseLaunch(
   const runDir = path.join(root, ".argent", "traces", timestamp);
   await fsp.mkdir(path.dirname(runDir), { recursive: true });
   await fsp.mkdir(runDir);
-  const buildKey = createHash("sha256")
-    .update([container, scheme, device.destination, "Release"].join("\n"))
-    .digest("hex")
-    .slice(0, 16);
+  const configuration = request.configuration ?? "Release";
+  const buildKey = appBuildKey(container, scheme, device.destination, configuration);
   const derivedDataPath = path.join(root, ".argent", "build-cache", "ios-launch", buildKey);
   const settings = await appSettings(
     root,
     container,
     scheme,
+    configuration,
     device.destination,
     derivedDataPath,
     signal
@@ -349,25 +413,13 @@ export async function prepareReleaseLaunch(
       ? null
       : await resolveRunnerSigningConfig();
   const appTeamId = configuredTeamId ?? detectedTeam?.teamId ?? null;
-  const args = [
-    "build",
-    ...containerArgs(container),
-    "-scheme",
-    scheme,
-    "-configuration",
-    "Release",
-    "-destination",
-    device.destination,
-    "-derivedDataPath",
-    derivedDataPath,
-    "-allowProvisioningUpdates",
-    "-allowProvisioningDeviceRegistration",
+  const args = appBuildArgs(container, scheme, configuration, device.destination, derivedDataPath, [
     ...(device.simulator
       ? ["CODE_SIGNING_ALLOWED=NO"]
       : !manuallySigned && appTeamId
         ? [`DEVELOPMENT_TEAM=${appTeamId}`]
         : []),
-  ];
+  ]);
   try {
     await runLogged("xcodebuild", args, {
       cwd: root,
@@ -377,14 +429,14 @@ export async function prepareReleaseLaunch(
   } catch (error) {
     signal?.throwIfAborted();
     throw new Error(
-      `Release build failed for the app's original bundle ID ${settings.PRODUCT_BUNDLE_IDENTIFIER}. ` +
+      `${configuration} build failed for the app's original bundle ID ${settings.PRODUCT_BUNDLE_IDENTIFIER}. ` +
         `If signing failed, set up this exact bundle ID for your Apple team in Xcode and retry. ` +
         (error instanceof Error ? error.message : String(error))
     );
   }
   const appPath = path.join(settings.TARGET_BUILD_DIR!, settings.FULL_PRODUCT_NAME!);
   if (!(await fsp.stat(appPath).catch(() => null))?.isDirectory()) {
-    throw new Error(`Release build succeeded but the app was not found at ${appPath}.`);
+    throw new Error(`${configuration} build succeeded but the app was not found at ${appPath}.`);
   }
   if (device.simulator) {
     await smallCommand(
@@ -429,7 +481,7 @@ export async function prepareReleaseLaunch(
     JSON.stringify(
       {
         ...context,
-        configuration: "Release",
+        configuration,
         launchState: "warm",
         preparedAt: new Date().toISOString(),
       },

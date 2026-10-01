@@ -11,11 +11,7 @@ import {
   type ToolDefinition,
 } from "@argent/registry";
 import { IOS_DEVICE_RUNNER_NAMESPACE } from "../../blueprints/ios-device-runner";
-import {
-  ensureLaunchDeviceReady,
-  prepareReleaseLaunch,
-  runLogged,
-} from "../../utils/ios-launch/workflow";
+import { ensureLaunchDeviceReady, prepareLaunch, runLogged } from "../../utils/ios-launch/workflow";
 import { resolveRunnerProjectPath } from "../../utils/ios-device/runner-artifact";
 import { resolveRunnerSigningConfig } from "../../utils/ios-device/runner-signing";
 
@@ -35,6 +31,11 @@ const schema = z.object({
     .string()
     .optional()
     .describe("Workspace or project path, relative to workspace_path."),
+  configuration: z
+    .string()
+    .min(1)
+    .default("Release")
+    .describe("Xcode build configuration for the app. Use an optimized, non-debug configuration."),
   allow_simulator: z
     .boolean()
     .default(false)
@@ -57,15 +58,16 @@ export function createIosLaunchMeasureTool(
   return {
     id: "ios-launch-measure",
     longRunning: true,
-    searchHint: "iOS iPhone app launch time XCTest warm Release benchmark first frame",
+    searchHint: "iOS iPhone app launch time XCTest warm benchmark first frame",
     capability: { apple: { device: true, simulator: true } },
     interaction: {
-      startedMsg: () => "Building and measuring iOS launch in Release",
+      startedMsg: ({ params }) =>
+        `Building and measuring iOS launch in ${params.configuration ?? "Release"}`,
       completedMsg: () => "Measured iOS launch",
       failedMsg: ({ failureSignal }) => `Failed to measure iOS launch: ${failureSignal.error_code}`,
     },
     description:
-      "Build an iOS app and Argent's XCUITest runner in Release, then measure five warm launches on a connected iPhone using XCTApplicationLaunchMetric. Results and build logs go to <workspace>/.argent/traces/<datetime>. The default metric ends at the first frame, or later if the app registers extended launch tasks. A simulator is used only with allow_simulator=true and its timings are not representative of an iPhone. Does not edit the app project.",
+      "Build an iOS app in the given configuration and Argent's XCUITest runner in Release, then measure five warm launches on a connected iPhone using XCTApplicationLaunchMetric. Results and build logs go to <workspace>/.argent/traces/<datetime>. The default metric ends at the first frame, or later if the app registers extended launch tasks. A simulator is used only with allow_simulator=true and its timings are not representative of an iPhone. Does not edit the app project.",
     zodSchema: schema,
     fileInputs,
     services: () => ({}),
@@ -80,13 +82,14 @@ export function createIosLaunchMeasureTool(
           );
         }
       }
-      const context = await prepareReleaseLaunch(
+      const context = await prepareLaunch(
         {
           workspacePath: params.workspace_path,
           deviceId: params.device_id,
           scheme: params.scheme,
           xcodeContainer: params.xcode_container,
           allowSimulator: params.allow_simulator,
+          configuration: params.configuration,
         },
         (message) => ctx?.emitProgress?.({ type: "device-action", message }),
         ctx?.signal
