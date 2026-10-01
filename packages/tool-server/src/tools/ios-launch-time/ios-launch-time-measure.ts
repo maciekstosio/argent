@@ -11,7 +11,11 @@ import {
   type ToolDefinition,
 } from "@argent/registry";
 import { IOS_DEVICE_RUNNER_NAMESPACE } from "../../blueprints/ios-device-runner";
-import { ensureLaunchDeviceReady, prepareLaunch, runLogged } from "../../utils/ios-launch/workflow";
+import {
+  ensureLaunchDeviceReady,
+  prepareLaunch,
+  runLogged,
+} from "../../utils/ios-launch-time/workflow";
 import { resolveRunnerProjectPath } from "../../utils/ios-device/runner-artifact";
 import { resolveRunnerSigningConfig } from "../../utils/ios-device/runner-signing";
 
@@ -52,11 +56,11 @@ type MetricResult = Array<{
   }>;
 }>;
 
-export function createIosLaunchMeasureTool(
+export function createIosLaunchTimeMeasureTool(
   registry: Registry
 ): ToolDefinition<z.infer<typeof schema>, unknown> {
   return {
-    id: "ios-launch-measure",
+    id: "ios-launch-time-measure",
     longRunning: true,
     searchHint: "iOS iPhone app launch time XCTest warm benchmark first frame",
     capability: { apple: { device: true, simulator: true } },
@@ -78,7 +82,7 @@ export function createIosLaunchMeasureTool(
           .services.get(`${IOS_DEVICE_RUNNER_NAMESPACE}:${params.device_id}`);
         if (active && isLiveServiceState(active.state)) {
           throw new Error(
-            `Argent's device runner is active on ${params.device_id}. Run stop-simulator-server for this device before ios-launch-measure, then retry.`
+            `Argent's device runner is active on ${params.device_id}. Run stop-simulator-server for this device before ios-launch-time-measure, then retry.`
           );
         }
       }
@@ -99,7 +103,7 @@ export function createIosLaunchMeasureTool(
         .services.get(`${IOS_DEVICE_RUNNER_NAMESPACE}:${context.deviceId}`);
       if (!context.simulator && runner && isLiveServiceState(runner.state)) {
         throw new Error(
-          `Argent's device runner is active on ${context.deviceId}. Run stop-simulator-server for this device before ios-launch-measure, then retry.`
+          `Argent's device runner is active on ${context.deviceId}. Run stop-simulator-server for this device before ios-launch-time-measure, then retry.`
         );
       }
       const project = resolveRunnerProjectPath();

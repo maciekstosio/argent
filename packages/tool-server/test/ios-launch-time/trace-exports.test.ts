@@ -4,7 +4,7 @@ import {
   launchEndNs,
   parseLifecyclePhases,
   truncateCpuXml,
-} from "../../src/utils/ios-launch/trace-exports";
+} from "../../src/utils/ios-launch-time/trace-exports";
 import { parseCpuXml } from "../../src/utils/ios-profiler/pipeline/xml-parser";
 
 // Shape of a real App Launch `life-cycle-period` export: later rows reference

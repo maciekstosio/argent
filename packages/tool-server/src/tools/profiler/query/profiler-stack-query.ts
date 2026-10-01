@@ -443,7 +443,7 @@ Returns a markdown report with native call stacks, thread weights, or leak detai
 Fails if native-profiler-analyze has not been run or no parsed trace data is in memory.`,
   zodSchema,
   // No chromium entry: it has no native trace capture. Physical iPhones only
-  // reach it through profiler-load of an ios-launch-profile session.
+  // reach it through profiler-load of an ios-launch-time-profile session.
   capability: {
     apple: { simulator: true, device: true },
     android: { emulator: true, device: true, unknown: true },

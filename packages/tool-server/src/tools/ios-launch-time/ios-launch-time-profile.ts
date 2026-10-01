@@ -9,13 +9,13 @@ import {
   prepareLaunch,
   runLogged,
   terminateForWarmLaunch,
-} from "../../utils/ios-launch/workflow";
+} from "../../utils/ios-launch-time/workflow";
 import {
   cpuTableXpath,
   launchEndNs,
   parseLifecyclePhases,
   truncateCpuXml,
-} from "../../utils/ios-launch/trace-exports";
+} from "../../utils/ios-launch-time/trace-exports";
 import { getDebugDir } from "../../utils/react-profiler/debug/dump";
 
 const execFileAsync = promisify(execFile);
@@ -69,8 +69,8 @@ function profilerSessionId(): string {
 
 const ms = (ns: number) => Math.round(ns / 100_000) / 10;
 
-export const iosLaunchProfileTool: ToolDefinition<z.infer<typeof schema>, unknown> = {
-  id: "ios-launch-profile",
+export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, unknown> = {
+  id: "ios-launch-time-profile",
   longRunning: true,
   searchHint: "iOS iPhone app launch Instruments xctrace trace startup first frame",
   capability: { apple: { device: true, simulator: true } },

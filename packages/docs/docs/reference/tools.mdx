@@ -126,10 +126,10 @@ Argent supports physical iPhones; physical iPads are not supported yet. `list-de
 
 ## iOS launch performance
 
-| Tool                 | Description                                                       |
-| -------------------- | ----------------------------------------------------------------- |
-| `ios-launch-measure` | Build the app and measure five warm launches with XCTest          |
-| `ios-launch-profile` | Build the app and record a warm App Launch trace with Instruments |
+| Tool                      | Description                                                       |
+| ------------------------- | ----------------------------------------------------------------- |
+| `ios-launch-time-measure` | Build the app and measure five warm launches with XCTest          |
+| `ios-launch-time-profile` | Build the app and record a warm App Launch trace with Instruments |
 
 Both tools accept `workspace_path`, an absolute path to the app project root. Argent finds one `.xcworkspace` or `.xcodeproj` at the root or in `ios/`. Set `xcode_container` to select a different workspace or project inside the root. Set `scheme` when Xcode lists more than one scheme. Argent stops when the scheme has multiple app targets.
 
@@ -137,11 +137,11 @@ Both tools accept `configuration`, the Xcode build configuration for the app. Th
 
 Both tools require `device_id` to select a connected iPhone. Set `allow_simulator: true` to use a booted simulator when no selected iPhone is available. Simulator timings use Mac hardware. Both tools build the app with its original bundle ID. Argent tries automatic signing and waits briefly for device unlock or trust actions. If the original bundle ID cannot be provisioned, Argent stops and reports the signing error.
 
-`ios-launch-measure` builds the Argent UI test runner in Release. The runner uses `XCTApplicationLaunchMetric` for five samples. Apple's metric includes the first frame and extended launch tasks. The result includes `averageMs`, `samplesMs`, and the `.xcresult` path.
+`ios-launch-time-measure` builds the Argent UI test runner in Release. The runner uses `XCTApplicationLaunchMetric` for five samples. Apple's metric includes the first frame and extended launch tasks. The result includes `averageMs`, `samplesMs`, and the `.xcresult` path.
 
-If Argent already has an active UI test runner on the selected iPhone, `ios-launch-measure` stops before the build. Run `stop-simulator-server` for that device, then retry the measurement.
+If Argent already has an active UI test runner on the selected iPhone, `ios-launch-time-measure` stops before the build. Run `stop-simulator-server` for that device, then retry the measurement.
 
-`ios-launch-profile` accepts `duration_seconds` from 5 to 60, with a default of 8. It records with the Instruments App Launch template. Argent ends the launch at the end of the `Launching - Initial Frame Rendering` phase. The result includes these fields:
+`ios-launch-time-profile` accepts `duration_seconds` from 5 to 60, with a default of 8. It records with the Instruments App Launch template. Argent ends the launch at the end of the `Launching - Initial Frame Rendering` phase. The result includes these fields:
 
 - `launchMs`: the time from the start of the app process to the end of the first frame.
 - `phases`: the lifecycle phases before the first frame, in milliseconds from the start of the trace.

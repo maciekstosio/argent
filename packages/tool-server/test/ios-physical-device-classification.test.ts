@@ -74,9 +74,9 @@ const PHYSICAL_IOS_PORTED_TOOLS: readonly string[] = [
   // Web URLs default to Safari and any other scheme must name the app.
   "open-url",
   // Build and launch through xcodebuild / xctrace --device, which target hardware directly.
-  "ios-launch-measure",
-  "ios-launch-profile",
-  // Host-side readers of the xctrace session ios-launch-profile writes; the
+  "ios-launch-time-measure",
+  "ios-launch-time-profile",
+  // Host-side readers of the xctrace session ios-launch-time-profile writes; the
   // native-profiler capture tools stay simulator-only.
   "profiler-load",
   "profiler-stack-query",

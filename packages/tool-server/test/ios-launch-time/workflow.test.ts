@@ -10,7 +10,7 @@ import {
   assertResolvedConfiguration,
   runLogged,
   showBuildSettingsArgs,
-} from "../../src/utils/ios-launch/workflow";
+} from "../../src/utils/ios-launch-time/workflow";
 
 let directory: string | null = null;
 
@@ -21,8 +21,8 @@ afterEach(async () => {
 
 it("advertises both launch commands as long running", () => {
   const definitions = definitionsById(createRegistry());
-  expect(definitions.get("ios-launch-measure")?.longRunning).toBe(true);
-  expect(definitions.get("ios-launch-profile")?.longRunning).toBe(true);
+  expect(definitions.get("ios-launch-time-measure")?.longRunning).toBe(true);
+  expect(definitions.get("ios-launch-time-profile")?.longRunning).toBe(true);
 });
 
 it("stops a logged subprocess when its tool request is cancelled", async () => {
@@ -64,7 +64,7 @@ it("keeps build caches of different configurations apart", () => {
 
 it("defaults the app configuration to Release in both tool schemas", () => {
   const definitions = definitionsById(createRegistry());
-  for (const id of ["ios-launch-measure", "ios-launch-profile"]) {
+  for (const id of ["ios-launch-time-measure", "ios-launch-time-profile"]) {
     const schema = definitions.get(id)!.zodSchema as import("zod").ZodType;
     const parsed = schema.parse({ workspace_path: "/x" }) as { configuration: string };
     expect(parsed.configuration).toBe("Release");
