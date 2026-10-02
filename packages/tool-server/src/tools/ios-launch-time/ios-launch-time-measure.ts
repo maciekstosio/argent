@@ -13,6 +13,7 @@ import {
 import { IOS_DEVICE_RUNNER_NAMESPACE } from "../../blueprints/ios-device-runner";
 import {
   ensureLaunchDeviceReady,
+  launchBuildCacheDir,
   prepareLaunch,
   runLogged,
 } from "../../utils/ios-launch-time/workflow";
@@ -134,13 +135,7 @@ export function createIosLaunchTimeMeasureTool(
         "-destination",
         context.destination,
         "-derivedDataPath",
-        path.join(
-          params.workspace_path,
-          ".argent",
-          "build-cache",
-          "ios-launch-time-runner",
-          runnerBuildKey
-        ),
+        launchBuildCacheDir("runner", runnerBuildKey),
         "-resultBundlePath",
         resultPath,
         "-parallel-testing-enabled",

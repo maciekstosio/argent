@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
+import { argentHomeDir } from "@argent/configuration-core";
 import {
   listIosPhysicalDevices,
   ensureDeviceReady,
@@ -19,7 +20,23 @@ import { xcodebuildFailureSummary } from "../ios-device/runner-artifact";
 import { signalGroup } from "../process-kill";
 
 const execFileAsync = promisify(execFile);
-const BUILD_TIMEOUT_MS = 15 * 60_000;
+// A clean Release build of a large app (many pods, Hermes bytecode) can pass
+// 15 minutes. The tools are long running and cancel through the abort signal,
+// so this only catches a hung xcodebuild.
+const BUILD_TIMEOUT_MS = 60 * 60_000;
+
+/**
+ * DerivedData for launch builds, outside the app project so it never lands in
+ * the project's git status or under Metro's watcher.
+ */
+export function launchBuildCacheDir(kind: "app" | "runner", key: string): string {
+  return path.join(
+    argentHomeDir(),
+    "build-cache",
+    kind === "app" ? "ios-launch-time" : "ios-launch-time-runner",
+    key
+  );
+}
 
 export interface LaunchRequest {
   workspacePath: string;
@@ -172,12 +189,19 @@ async function selectDevice(
   deviceSet: string | null;
   destination: string;
 }> {
-  const physical = (await listIosPhysicalDevices()).filter(
-    (device) => device.transportType === "wired"
-  );
+  const devices = await listIosPhysicalDevices();
   const selected = request.deviceId
-    ? physical.find((device) => device.udid === request.deviceId)
+    ? devices.find((device) => device.udid === request.deviceId)
     : undefined;
+  // Matched before the cable filter, so a named iPhone that is off the cable
+  // says so instead of reading as absent.
+  if (selected && selected.transportType !== "wired") {
+    throw new Error(
+      `iPhone ${selected.udid} is not connected by USB cable (transport: ${selected.transportType ?? "none"}). ` +
+        "Launch measurement runs over the cable; connect it and retry."
+    );
+  }
+  const physical = devices.filter((device) => device.transportType === "wired");
   if (selected) {
     await waitForDeviceAction(() => ensureDeviceReady(selected.udid), onProgress, signal);
     return {
@@ -269,11 +293,52 @@ async function selectScheme(
       throw new Error(`Scheme ${requested} not found in ${container}.`);
     return requested;
   }
-  if (schemes.length === 1) return schemes[0]!;
-  throw new Error(`Select a scheme explicitly. Available schemes: ${schemes.join(", ")}`);
+  const podSchemes = await podSchemeNames(container);
+  const picked = pickScheme(schemes, container, podSchemes);
+  if (picked) return picked;
+  const own = schemes.filter((scheme) => !podSchemes.has(scheme));
+  const shown = own.slice(0, MAX_LISTED_SCHEMES).join(", ");
+  const more =
+    own.length > MAX_LISTED_SCHEMES ? ` and ${own.length - MAX_LISTED_SCHEMES} more` : "";
+  throw new Error(`Select a scheme explicitly. Available schemes: ${shown}${more}`);
 }
 
-interface XcodeSettings {
+// Keeps the error short; the full list is one `xcodebuild -list` away.
+const MAX_LISTED_SCHEMES = 15;
+
+/** Schemes CocoaPods writes for each pod; `xcodebuild -list` mixes them into the workspace's. */
+async function podSchemeNames(container: string): Promise<Set<string>> {
+  const pods = path.join(path.dirname(container), "Pods", "Pods.xcodeproj");
+  const directories = [path.join(pods, "xcshareddata", "xcschemes")];
+  for (const user of await fsp.readdir(path.join(pods, "xcuserdata")).catch(() => [])) {
+    directories.push(path.join(pods, "xcuserdata", user, "xcschemes"));
+  }
+  const names = new Set<string>();
+  for (const directory of directories) {
+    for (const entry of await fsp.readdir(directory).catch(() => [])) {
+      if (entry.endsWith(".xcscheme")) names.add(entry.slice(0, -".xcscheme".length));
+    }
+  }
+  return names;
+}
+
+/**
+ * The only scheme, else the only non-pod scheme, else the one named after the
+ * workspace or project (React Native, Expo and Flutter all name it so).
+ */
+export function pickScheme(
+  schemes: string[],
+  container: string,
+  podSchemes: ReadonlySet<string>
+): string | null {
+  if (schemes.length === 1) return schemes[0]!;
+  const own = schemes.filter((scheme) => !podSchemes.has(scheme));
+  if (own.length === 1) return own[0]!;
+  const named = path.basename(container).replace(/\.(xcworkspace|xcodeproj)$/, "");
+  return own.includes(named) ? named : null;
+}
+
+export interface XcodeSettings {
   target: string;
   buildSettings: Record<string, string>;
 }
@@ -298,6 +363,23 @@ export function showBuildSettingsArgs(
     "-derivedDataPath",
     derivedDataPath,
   ];
+}
+
+const IOS_PLATFORMS = new Set(["iphoneos", "iphonesimulator"]);
+
+/**
+ * The iOS app targets of a scheme. Embedded watchOS apps and App Clips also
+ * have the `.app` extension, so match the plain application product type on an
+ * iOS platform; fall back to any `.app` for project types this does not know.
+ */
+export function iosAppTargets(settings: XcodeSettings[]): XcodeSettings[] {
+  const apps = settings.filter((entry) => entry.buildSettings.WRAPPER_EXTENSION === "app");
+  const iosApps = apps.filter(
+    ({ buildSettings }) =>
+      buildSettings.PRODUCT_TYPE === "com.apple.product-type.application" &&
+      IOS_PLATFORMS.has(buildSettings.PLATFORM_NAME ?? "")
+  );
+  return iosApps.length > 0 ? iosApps : apps;
 }
 
 export function assertResolvedConfiguration(
@@ -340,7 +422,7 @@ async function appSettings(
   const settings = JSON.parse(
     await smallCommand("xcodebuild", args, root, signal)
   ) as XcodeSettings[];
-  const apps = settings.filter((entry) => entry.buildSettings.WRAPPER_EXTENSION === "app");
+  const apps = iosAppTargets(settings);
   if (apps.length !== 1) {
     throw new Error(
       `Scheme ${scheme} resolves to ${apps.length} app targets; select an unambiguous app scheme.`
@@ -416,7 +498,7 @@ export async function prepareLaunch(
   await fsp.mkdir(runDir);
   const configuration = request.configuration ?? "Release";
   const buildKey = appBuildKey(container, scheme, device.destination, configuration);
-  const derivedDataPath = path.join(root, ".argent", "build-cache", "ios-launch-time", buildKey);
+  const derivedDataPath = launchBuildCacheDir("app", buildKey);
   const settings = await appSettings(
     root,
     container,

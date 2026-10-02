@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRegistry } from "../../src/utils/setup-registry";
 import { definitionsById } from "../helpers/catalog";
@@ -8,6 +8,9 @@ import {
   appBuildArgs,
   appBuildKey,
   assertResolvedConfiguration,
+  iosAppTargets,
+  launchBuildCacheDir,
+  pickScheme,
   runLogged,
   showBuildSettingsArgs,
 } from "../../src/utils/ios-launch-time/workflow";
@@ -69,4 +72,48 @@ it("defaults the app configuration to Release in both tool schemas", () => {
     const parsed = schema.parse({ workspace_path: "/x" }) as { configuration: string };
     expect(parsed.configuration).toBe("Release");
   }
+});
+
+it("picks the app scheme among the schemes CocoaPods adds", () => {
+  const pods = new Set(["React-Core", "Yoga", "Pods-App"]);
+  const all = ["App", "React-Core", "Yoga", "Pods-App"];
+  expect(pickScheme(all, "/r/ios/App.xcworkspace", pods)).toBe("App");
+  expect(pickScheme(["Only"], "/r/ios/App.xcworkspace", new Set())).toBe("Only");
+  // Several app schemes: the one named after the workspace wins.
+  expect(pickScheme(["Runner", "Runner-Dev", "Yoga"], "/r/ios/Runner.xcworkspace", pods)).toBe(
+    "Runner"
+  );
+  expect(pickScheme(["Dev", "Prod"], "/r/ios/App.xcworkspace", new Set())).toBeNull();
+});
+
+it("selects the iOS app target over embedded watch apps and App Clips", () => {
+  const target = (name: string, settings: Record<string, string>) => ({
+    target: name,
+    buildSettings: { WRAPPER_EXTENSION: "app", ...settings },
+  });
+  const app = target("App", {
+    PRODUCT_TYPE: "com.apple.product-type.application",
+    PLATFORM_NAME: "iphoneos",
+  });
+  const watch = target("Watch", {
+    PRODUCT_TYPE: "com.apple.product-type.application",
+    PLATFORM_NAME: "watchos",
+  });
+  const clip = target("Clip", {
+    PRODUCT_TYPE: "com.apple.product-type.application.on-demand-install-capable",
+    PLATFORM_NAME: "iphoneos",
+  });
+  const widget = { target: "Widget", buildSettings: { WRAPPER_EXTENSION: "appex" } };
+  expect(iosAppTargets([app, watch, clip, widget])).toEqual([app]);
+  const unknown = target("Legacy", {});
+  expect(iosAppTargets([unknown, widget])).toEqual([unknown]);
+});
+
+it("keeps launch build caches out of the app project", () => {
+  expect(launchBuildCacheDir("app", "k")).toBe(
+    join(homedir(), ".argent", "build-cache", "ios-launch-time", "k")
+  );
+  expect(launchBuildCacheDir("runner", "k")).toBe(
+    join(homedir(), ".argent", "build-cache", "ios-launch-time-runner", "k")
+  );
 });

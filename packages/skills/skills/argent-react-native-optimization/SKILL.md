@@ -57,10 +57,7 @@ Navigate every screen and UI flow within scope, confirm each renders without err
 
 TTI is made of two parts. Measure both; neither alone is TTI.
 
-1. **Native launch (iOS)** — process start to the first native frame, before the React Native runtime is created. It is an important part of TTI and must be measured too.
-   - `ios-launch-time-measure` — five XCTest launch samples (`averageMs`, `samplesMs`). Use it as the baseline and to verify fixes.
-   - `ios-launch-time-profile` — Instruments App Launch trace: lifecycle phases plus a CPU session. Then `profiler-load` (`load_native`) → `profiler-stack-query` (`thread_breakdown`, `thread: "Main Thread"`) to find what delays the first frame (static initializers, dylib loading, heavy `didFinishLaunching` work).
-   - Both build in Release and need a physical iPhone (simulator timings reflect Mac hardware). They run the app once first, so the measured launch is usually warm; iOS can still evict the app.
+1. **Native launch (iOS)** — process start to the first native frame, before the React Native runtime is created. Measure and profile it with `ios-launch-time-measure` and `ios-launch-time-profile`; follow §7 of `argent-native-profiler`.
 2. **React Native startup** — runtime creation, bundle load and evaluation, first meaningful render. Measure with `argent-react-native-profiler` (`react-profiler-start` before reload, CPU profile of bundle evaluation, commits up to the first usable screen).
 
 Report each part separately and their sum as the TTI estimate. Re-measure the part you changed and confirm the other did not regress.
