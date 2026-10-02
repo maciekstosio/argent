@@ -16,7 +16,6 @@ import {
   type NativeProfilerSessionApi,
 } from "../../../blueprints/native-profiler-session";
 import { resolveDevice } from "../../../utils/device-info";
-import { RN_ONLY_TOOL_CAPABILITY } from "../../debugger/debugger-service-ref";
 import { readCommitTree } from "../../../utils/react-profiler/debug/dump";
 import { runIosProfilerPipeline } from "../../../utils/ios-profiler/pipeline/index";
 import { getDebugDir } from "../../../utils/react-profiler/debug/dump";
@@ -502,8 +501,9 @@ Fails if the session_id is not found or required XML files are missing from disk
   // equivalent; the gate fails at the call site, not inside the trace parser.
   // Physical iPhones load the xctrace sessions ios-launch-time-profile writes.
   capability: {
-    ...RN_ONLY_TOOL_CAPABILITY,
-    apple: { ...RN_ONLY_TOOL_CAPABILITY.apple, device: true },
+    apple: { simulator: true, device: true },
+    appleRemote: { simulator: true },
+    android: { emulator: true, device: true, unknown: true },
   },
   services: (params) => {
     const svcs: Record<string, ServiceRef> = {};

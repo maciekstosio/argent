@@ -157,13 +157,9 @@ NATIVE PROFILING
 Use skill: `argent-native-profiler`
 When: Profiling native performance (CPU hotspots, UI hangs, memory leaks). iOS only today; Android on the roadmap. Useful as a reference for platform-specific investigation when running dual profiling via `argent-react-native-profiler`.
 
-iOS APP LAUNCH PERFORMANCE
-Use tools: `ios-launch-time-measure` and `ios-launch-time-profile`
-When: Measuring iOS launch time (process start to first frame) or analyzing an Instruments App Launch trace. Use a physical iPhone. The tools build the app (Release by default), measure a warm launch, and save results under `.argent/traces/`.
-
 PERFORMANCE OPTIMIZATION
 Use skill: `argent-react-native-optimization`
-When: App feels slow, user asks to optimize, reducing bundle size, improving startup time, fixing re-renders, optimizing lists/images/navigation, or general performance work. For iOS launch measurement, use the iOS App Launch tools above.
+When: App feels slow, user asks to optimize, reducing bundle size, improving startup time, fixing re-renders, optimizing lists/images/navigation, or any performance-related task. This is the entry-point skill for all performance work, including startup time / TTI and iOS launch measurement — it delegates to `argent-react-native-profiler` for measurement.
 
 INTERACTIVE UI TESTING (ONE-OFF, NOT SAVED)
 Skill: `argent-test-ui-flow`

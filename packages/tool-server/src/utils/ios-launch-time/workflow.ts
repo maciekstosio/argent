@@ -86,15 +86,23 @@ export async function runLogged(
   };
   options.signal?.addEventListener("abort", stop, { once: true });
   if (options.signal?.aborted) stop();
+  const timeoutMs = options.timeoutMs ?? BUILD_TIMEOUT_MS;
+  let timedOut = false;
   const timer = setTimeout(() => {
+    timedOut = true;
     if (child.pid) signalGroup(child.pid, "SIGKILL");
-  }, options.timeoutMs ?? BUILD_TIMEOUT_MS);
+  }, timeoutMs);
   try {
     const code = await new Promise<number>((resolve, reject) => {
       child.once("error", reject);
       child.once("close", (exitCode) => resolve(exitCode ?? -1));
     });
     options.signal?.throwIfAborted();
+    if (timedOut) {
+      throw new Error(
+        `${command} timed out after ${Math.round(timeoutMs / 1000)} s and was killed. Full log: ${options.logPath}`
+      );
+    }
     if (code !== 0) {
       throw new Error(`${command} exited with ${code}:\n${errorText(tail, options.logPath)}`);
     }
@@ -494,7 +502,7 @@ export async function prepareLaunch(
       {
         ...context,
         configuration,
-        launchState: "warm",
+        launchPreparation: "prelaunched",
         preparedAt: new Date().toISOString(),
       },
       null,

@@ -39,7 +39,9 @@ const schema = z.object({
     .string()
     .min(1)
     .default("Release")
-    .describe("Xcode build configuration for the app. Use an optimized, non-debug configuration."),
+    .describe(
+      "Xcode build configuration for the app. Set only when the project's Release configuration has another name, such as Production."
+    ),
   allow_simulator: z
     .boolean()
     .default(false)
@@ -71,7 +73,7 @@ export function createIosLaunchTimeMeasureTool(
       failedMsg: ({ failureSignal }) => `Failed to measure iOS launch: ${failureSignal.error_code}`,
     },
     description:
-      "Build an iOS app in the given configuration and Argent's XCUITest runner in Release, then measure five warm launches on a connected iPhone using XCTApplicationLaunchMetric. Results and build logs go to <workspace>/.argent/traces/<datetime>. The default metric ends at the first frame, or later if the app registers extended launch tasks. A simulator is used only with allow_simulator=true and its timings are not representative of an iPhone. Does not edit the app project.",
+      "Build an iOS app and Argent's XCUITest runner in Release, run the app once, then measure five launches on a connected iPhone using XCTApplicationLaunchMetric. The prelaunch usually makes these warm launches, but iOS can still evict the app from memory. Results and build logs go to <workspace>/.argent/traces/<datetime>. The default metric ends at the first frame, or later if the app registers extended launch tasks. A simulator is used only with allow_simulator=true and its timings are not representative of an iPhone. Does not edit the app project.",
     zodSchema: schema,
     fileInputs,
     services: () => ({}),

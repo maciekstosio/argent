@@ -38,7 +38,9 @@ const schema = z.object({
     .string()
     .min(1)
     .default("Release")
-    .describe("Xcode build configuration for the app. Use an optimized, non-debug configuration."),
+    .describe(
+      "Xcode build configuration for the app. Set only when the project's Release configuration has another name, such as Production."
+    ),
   allow_simulator: z
     .boolean()
     .default(false)
@@ -81,7 +83,7 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
       `Failed to record iOS App Launch: ${failureSignal.error_code}`,
   },
   description:
-    "Build an iOS app in the given configuration, warm-launch it on a physical iPhone under Xcode Instruments' App Launch template, and return the launch phases up to the first frame. Saves the .trace and XML exports (lifecycle, dyld) under <workspace>/.argent/traces/<datetime>, and the CPU samples up to the first frame as a native profiler session for profiler-load and profiler-stack-query. A simulator requires explicit allow_simulator=true.",
+    "Build an iOS app in Release, run it once, then relaunch it on a physical iPhone under Xcode Instruments' App Launch template (usually a warm launch; iOS can still evict the app from memory), and return the launch phases up to the first frame. Saves the .trace and XML exports (lifecycle, dyld) under <workspace>/.argent/traces/<datetime>, and the CPU samples up to the first frame as a native profiler session for profiler-load and profiler-stack-query. A simulator requires explicit allow_simulator=true.",
   zodSchema: schema,
   fileInputs,
   services: () => ({}),
