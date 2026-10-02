@@ -505,6 +505,9 @@ Fails if the session_id is not found or required XML files are missing from disk
     appleRemote: { simulator: true },
     android: { emulator: true, device: true, unknown: true },
   },
+  // load_native re-parses the whole export, which can outlast the 30s MCP fetch
+  // timeout; an aborted call is replayed, not cancelled.
+  longRunning: true,
   services: (params) => {
     const svcs: Record<string, ServiceRef> = {};
     if (params.mode === "load_native") {
