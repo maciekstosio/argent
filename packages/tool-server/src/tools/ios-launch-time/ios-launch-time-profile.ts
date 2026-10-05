@@ -69,6 +69,25 @@ function profilerSessionId(): string {
     .slice(0, 15);
 }
 
+// The ID has one-second resolution, so a session started in the same second
+// would share it. Write exclusively and take the next second's ID on a clash.
+async function writeProfilerSession(
+  xml: string
+): Promise<{ sessionId: string; cpuXmlPath: string }> {
+  const debugDir = await getDebugDir();
+  for (;;) {
+    const sessionId = profilerSessionId();
+    const cpuXmlPath = path.join(debugDir, `native-profiler-${sessionId}_raw_cpu.xml`);
+    try {
+      await fsp.writeFile(cpuXmlPath, xml, { flag: "wx" });
+      return { sessionId, cpuXmlPath };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+}
+
 const ms = (ns: number) => Math.round(ns / 100_000) / 10;
 
 export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, unknown> = {
@@ -199,9 +218,7 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
     if (exported.cpu) {
       const cpuXml = await fsp.readFile(exported.cpu, "utf8");
       const cut = endNs === null ? null : truncateCpuXml(cpuXml, endNs);
-      sessionId = profilerSessionId();
-      cpuXmlPath = path.join(await getDebugDir(), `native-profiler-${sessionId}_raw_cpu.xml`);
-      await fsp.writeFile(cpuXmlPath, cut?.xml ?? cpuXml);
+      ({ sessionId, cpuXmlPath } = await writeProfilerSession(cut?.xml ?? cpuXml));
       // The launch-window copy is the one to analyze; drop the full export.
       await fsp.rm(exported.cpu, { force: true });
       delete exported.cpu;
