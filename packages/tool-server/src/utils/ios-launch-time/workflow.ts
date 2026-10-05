@@ -38,7 +38,7 @@ export function launchBuildCacheDir(kind: "app" | "runner", key: string): string
   );
 }
 
-export interface LaunchRequest {
+interface LaunchRequest {
   workspacePath: string;
   deviceId?: string;
   scheme?: string;
@@ -48,7 +48,7 @@ export interface LaunchRequest {
   configuration?: string;
 }
 
-export interface LaunchContext {
+interface LaunchContext {
   runDir: string;
   deviceId: string;
   deviceName: string;
@@ -338,7 +338,7 @@ export function pickScheme(
   return own.includes(named) ? named : null;
 }
 
-export interface XcodeSettings {
+interface XcodeSettings {
   target: string;
   buildSettings: Record<string, string>;
 }
