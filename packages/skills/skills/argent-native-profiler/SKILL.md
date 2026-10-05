@@ -116,4 +116,4 @@ For any iOS app (Swift, Objective-C, React Native, Flutter) when the user asks a
 - `ios-launch-time-measure` — five XCTest launch samples (`averageMs`, `samplesMs`). Use as the baseline and to verify fixes.
 - `ios-launch-time-profile` — Instruments App Launch trace: phases up to the first frame plus a CPU session. Follow `profilerSession.next` (`profiler-load` `load_native` → `profiler-stack-query` `thread_breakdown` with `thread: "Main Thread"`), then `function_callers` for the dominant function. Typical causes: static initializers, dylib loading, heavy `didFinishLaunching` work.
 - Both build in Release and need a physical iPhone on a USB cable. Use `allow_simulator: true` only when the user accepts Mac-hardware timings. The measured launch is usually warm.
-- The launch ends at the first frame. Work after it, such as a React Native JS bundle, belongs to that framework's profiler.
+- The launch ends at the first frame. Framework work before it (e.g. React Native runtime creation) appears in the launch profile; work after it belongs to that framework's profiler.
