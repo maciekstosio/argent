@@ -102,7 +102,7 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
       `Failed to record iOS App Launch: ${failureSignal.error_code}`,
   },
   description:
-    "Build an iOS app in Release, run it once, then relaunch it on a physical iPhone under Xcode Instruments' App Launch template (usually a warm launch; iOS can still evict the app from memory), and return the launch phases up to the first frame. Saves the .trace and XML exports (lifecycle, dyld) under <workspace>/.argent/traces/<datetime>, and the CPU samples up to the first frame as a native profiler session for profiler-load and profiler-stack-query. A simulator requires explicit allow_simulator=true.",
+    "Profile an iOS app launch on a physical iPhone with the Xcode Instruments App Launch template. Use when the launch is slow and you need to know which phases and functions run before the first frame, e.g. static initializers, dylib loading or didFinishLaunching work. Builds the app in Release and runs it once first, so the recorded launch is usually warm; iOS can still evict the app from memory. Set `allow_simulator` only when Mac-hardware timings are acceptable. Returns { launchMs, firstFrameEndMs, phases, tracePath, exports, profilerSession }. The .trace and XML exports go to <workspace>/.argent/traces/<datetime>; profilerSession holds the CPU samples up to the first frame for profiler-load and profiler-stack-query. Fails if no iPhone is connected by USB cable, the scheme cannot be resolved, the build fails, or xctrace cannot record the launch.",
   zodSchema: schema,
   fileInputs,
   services: () => ({}),

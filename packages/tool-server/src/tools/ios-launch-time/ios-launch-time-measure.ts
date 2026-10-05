@@ -74,7 +74,7 @@ export function createIosLaunchTimeMeasureTool(
       failedMsg: ({ failureSignal }) => `Failed to measure iOS launch: ${failureSignal.error_code}`,
     },
     description:
-      "Build an iOS app and Argent's XCUITest runner in Release, run the app once, then measure five launches on a connected iPhone using XCTApplicationLaunchMetric. The prelaunch usually makes these warm launches, but iOS can still evict the app from memory. Results and build logs go to <workspace>/.argent/traces/<datetime>. The default metric ends at the first frame, or later if the app registers extended launch tasks. A simulator is used only with allow_simulator=true and its timings are not representative of an iPhone. Does not edit the app project.",
+      "Run five launches of an iOS app on a connected iPhone and measure them with XCTApplicationLaunchMetric. Use when the user asks how long the app takes to launch, e.g. to set a baseline before an optimization or to verify a fix. Builds the app and Argent's XCUITest runner in Release and runs the app once first, so the launches are usually warm; iOS can still evict the app from memory. The default metric ends at the first frame, or later if the app registers extended launch tasks. Set `allow_simulator` only when Mac-hardware timings are acceptable. Does not edit the app project. Returns { averageMs, samplesMs, device, bundleId, resultPath, metricsPath, logPath }; results and build logs go to <workspace>/.argent/traces/<datetime>. Fails if no iPhone is connected by USB cable, the scheme cannot be resolved, the build fails, or Argent's device runner is active on the iPhone.",
     zodSchema: schema,
     fileInputs,
     services: () => ({}),
