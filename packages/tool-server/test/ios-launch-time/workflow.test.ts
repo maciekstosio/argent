@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import {
   appBuildArgs,
   appBuildKey,
   assertResolvedConfiguration,
+  freeProfileLimitMessage,
   iosAppTargets,
   launchBuildCacheDir,
   pickScheme,
@@ -60,9 +61,66 @@ it("checks the resolved CONFIGURATION against the requested one", () => {
 });
 
 it("keeps build caches of different configurations apart", () => {
-  const a = appBuildKey("c", "s", "d", "Release");
-  expect(a).toBe(appBuildKey("c", "s", "d", "Release"));
-  expect(a).not.toBe(appBuildKey("c", "s", "d", "Production"));
+  const a = appBuildKey("c", "s", "d", "Release", "Xcode 26.3");
+  expect(a).toBe(appBuildKey("c", "s", "d", "Release", "Xcode 26.3"));
+  expect(a).not.toBe(appBuildKey("c", "s", "d", "Production", "Xcode 26.3"));
+});
+
+it("keeps build caches of different Xcode versions apart", () => {
+  expect(appBuildKey("c", "s", "d", "Release", "Xcode 26.3")).not.toBe(
+    appBuildKey("c", "s", "d", "Release", "Xcode 26.4")
+  );
+});
+
+describe("freeProfileLimitMessage", () => {
+  const cap =
+    "This device has reached the maximum number of installed apps using a free developer profile.";
+
+  it("ignores text without the free-profile cap", () => {
+    expect(
+      freeProfileLimitMessage("No profiles for x", { subject: "s", logPath: "/l" })
+    ).toBeNull();
+  });
+
+  it("explains the cap and names the log", () => {
+    const message = freeProfileLimitMessage(cap, { subject: "the runner", logPath: "/l.log" });
+    expect(message).toContain("no slot for the runner");
+    expect(message).toContain("Log: /l.log");
+    expect(message).not.toContain("leftover");
+  });
+
+  it("names an Argent runner of another team as a leftover", () => {
+    const text = `${cap} Installed: com.example.app, com.argent.runner.tabc123, com.argent.runner.tmine99.uitests`;
+    const message = freeProfileLimitMessage(text, {
+      subject: "the runner",
+      logPath: "/l",
+      ownBundleIdPrefix: "com.argent.runner.tMINE99",
+    });
+    expect(message).toContain("com.argent.runner.tabc123 looks like a leftover");
+    expect(message).not.toContain("tmine99 looks");
+  });
+
+  it("does not call the own runner a leftover", () => {
+    const message = freeProfileLimitMessage(`${cap} com.argent.runner.tmine99`, {
+      subject: "the runner",
+      logPath: "/l",
+      ownBundleIdPrefix: "com.argent.runner.tmine99",
+    });
+    expect(message).not.toContain("leftover");
+  });
+});
+
+it("reports the free-profile cap from a failed logged command, not a signing hint", async () => {
+  directory = await mkdtemp(join(tmpdir(), "argent-launch-free-"));
+  const script =
+    "console.error('error: Provisioning Profile: x'); " +
+    "console.error('maximum number of installed apps using a free developer profile'); process.exit(65)";
+  const error = await runLogged(process.execPath, ["-e", script], {
+    cwd: directory,
+    logPath: join(directory, "child.log"),
+  }).catch((e: Error) => e);
+  expect((error as Error).message).toContain("free developer profile");
+  expect((error as Error).message).not.toContain("Provisioning failed");
 });
 
 it("defaults the app configuration to Release in both tool schemas", () => {

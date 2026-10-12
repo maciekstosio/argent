@@ -9,10 +9,14 @@ import {
   prepareLaunch,
   runLogged,
   terminateForWarmLaunch,
+  terminateLaunchedApp,
+  xcodeVersion,
 } from "../../utils/ios-launch-time/workflow";
 import {
   cpuTableXpath,
+  earliestDyldStartNs,
   launchEndNs,
+  parseFirstFrameSignpostNs,
   parseLifecyclePhases,
   truncateCpuXml,
 } from "../../utils/ios-launch-time/trace-exports";
@@ -88,6 +92,16 @@ async function writeProfilerSession(
   }
 }
 
+/** True when xctrace stalled right after "Starting recording" and never reached its time limit. */
+function stalledAtRecordingStart(log: string): boolean {
+  const lines = log.split("\n").filter((line) => line.trim());
+  const last = lines.at(-1) ?? "";
+  return (
+    /starting recording/i.test(last) &&
+    !/reached specified time limit|recording completed/i.test(log)
+  );
+}
+
 const ms = (ns: number) => Math.round(ns / 100_000) / 10;
 
 export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, unknown> = {
@@ -102,7 +116,7 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
       `Failed to record iOS App Launch: ${failureSignal.error_code}`,
   },
   description:
-    "Profile an iOS app launch on a physical iPhone with the Xcode Instruments App Launch template. Use when the launch is slow and you need to know which phases and functions run before the first frame, e.g. static initializers, dylib loading or didFinishLaunching work. Builds the app in Release and runs it once first, so the recorded launch is usually warm; iOS can still evict the app from memory. Set `allow_simulator` only when Mac-hardware timings are acceptable. Returns { launchMs, firstFrameEndMs, phases, tracePath, exports, profilerSession }. The .trace and XML exports go to <workspace>/.argent/traces/<datetime>; profilerSession holds the CPU samples up to the first frame for profiler-load and profiler-stack-query. Fails if no iPhone is connected by USB cable, the scheme cannot be resolved, the build fails, or xctrace cannot record the launch.",
+    "Profile an iOS app launch with the Xcode Instruments App Launch template. Use when the launch is slow and you need to know which phases and functions run before the first frame, e.g. static initializers, dylib loading or didFinishLaunching work. Builds the app in Release and runs it once first, so the recorded launch is usually warm; iOS can still evict the app from memory. Set `allow_simulator` only when Mac-hardware timings are acceptable; on a simulator there are no phases or launchMs, the first frame comes from a system signpost, and simulatorLaunchEstimateMs is a rough estimate. cpuSamples counts differ between runs because the sampling period varies from 1 to 5 ms. Returns { launchMs, firstFrameEndMs, phases, tracePath, exports, profilerSession, warning }. The .trace and XML exports go to <workspace>/.argent/traces/<datetime>; profilerSession holds the CPU samples up to the first frame for profiler-load and profiler-stack-query. Fails if no iPhone is connected by USB cable, the scheme cannot be resolved, the build fails, or xctrace cannot record the launch (Xcode 26.4.x stalls recording launches on simulators).",
   zodSchema: schema,
   fileInputs,
   services: () => ({}),
@@ -127,31 +141,52 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
     );
     const tracePath = path.join(context.runDir, "app-launch.trace");
     const recordLog = path.join(context.runDir, "xctrace-record.log");
-    await runLogged(
-      "xcrun",
-      [
-        "xctrace",
-        "record",
-        "--template",
-        "App Launch",
-        "--device",
-        context.deviceId,
-        "--output",
-        tracePath,
-        "--time-limit",
-        `${params.duration_seconds}s`,
-        "--no-prompt",
-        "--launch",
-        "--",
-        context.bundleId,
-      ],
-      { cwd: params.workspace_path, logPath: recordLog, timeoutMs: 180_000, signal: ctx?.signal }
-    );
+    try {
+      await runLogged(
+        "xcrun",
+        [
+          "xctrace",
+          "record",
+          "--template",
+          "App Launch",
+          // The system's first-frame signpost is the only launch marker on a simulator.
+          ...(context.simulator ? ["--instrument", "os_signpost"] : []),
+          "--device",
+          context.deviceId,
+          "--output",
+          tracePath,
+          "--time-limit",
+          `${params.duration_seconds}s`,
+          "--no-prompt",
+          "--launch",
+          "--",
+          context.bundleId,
+        ],
+        { cwd: params.workspace_path, logPath: recordLog, timeoutMs: 180_000, signal: ctx?.signal }
+      );
+    } catch (error) {
+      // A stalled or aborted recording leaves the launched app suspended.
+      await terminateLaunchedApp(context);
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        message.includes("timed out") &&
+        stalledAtRecordingStart(await fsp.readFile(recordLog, "utf8").catch(() => ""))
+      ) {
+        throw new Error(
+          `xctrace stalled at "Starting recording" with ${await xcodeVersion()}. ` +
+            "Recording an app launch on a simulator is a known issue with Xcode 26.4.x. " +
+            "Use Xcode 26.3 or 27, or record on a physical iPhone. " +
+            `Record log: ${recordLog}`,
+          { cause: error }
+        );
+      }
+      throw error;
+    }
     if (!(await fsp.stat(tracePath).catch(() => null))?.isDirectory()) {
       throw new Error(`xctrace finished without a trace at ${tracePath}; see ${recordLog}.`);
     }
     const exportErrors: Record<string, string> = {};
-    const exported: Partial<Record<"lifecycle" | "dyld" | "cpu", string>> = {};
+    const exported: Partial<Record<"lifecycle" | "dyld" | "cpu" | "signpost", string>> = {};
     let toc = "";
     try {
       const { stdout } = await execFileAsync(
@@ -173,6 +208,10 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
         ? TABLE_XPATH("dyld-activity-interval")
         : null,
       cpu: cpuTableXpath(toc),
+      // Recorded on simulators only.
+      ...(context.simulator && {
+        signpost: toc.includes('schema="os-signpost"') ? TABLE_XPATH("os-signpost") : null,
+      }),
     };
     for (const [key, xpath] of Object.entries(xpaths) as Array<
       [keyof typeof xpaths, string | null]
@@ -202,14 +241,45 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
     }
     ctx?.signal?.throwIfAborted();
 
+    // Instruments never fills life-cycle-period on a simulator, so that is not an export error.
+    if (context.simulator) delete exportErrors.lifecycle;
     const phases = exported.lifecycle
       ? parseLifecyclePhases(await fsp.readFile(exported.lifecycle, "utf8"))
       : [];
-    const endNs = launchEndNs(phases);
-    if (exported.lifecycle && endNs === null) {
+    let endNs = launchEndNs(phases);
+    let simulatorLaunchEstimateMs: number | null = null;
+    let signpostMissing = false;
+    if (context.simulator) {
+      const signpostNs = exported.signpost
+        ? parseFirstFrameSignpostNs(
+            await fsp.readFile(exported.signpost, "utf8"),
+            context.executableName
+          )
+        : null;
+      signpostMissing = signpostNs === null;
+      endNs = signpostNs;
+      const dyldStartNs = exported.dyld
+        ? earliestDyldStartNs(await fsp.readFile(exported.dyld, "utf8"))
+        : null;
+      if (signpostNs !== null && dyldStartNs !== null && signpostNs >= dyldStartNs) {
+        simulatorLaunchEstimateMs = ms(signpostNs - dyldStartNs);
+      }
+    } else if (exported.lifecycle && endNs === null) {
       exportErrors.lifecycle =
         "Lifecycle export has no first-frame phase; CPU samples are not cut.";
     }
+    const notes = [
+      context.warning,
+      context.simulator
+        ? "Lifecycle phases exist only on a physical iPhone; Instruments does not record them on simulators. " +
+          "The first frame comes from the system ApplicationFirstFramePresentation signpost. " +
+          "Timings under xctrace on a simulator run roughly 2x slower than an uninstrumented launch and reflect Mac hardware, " +
+          "so use them for relative CPU analysis only." +
+          (signpostMissing
+            ? " The signpost is missing, so the CPU session covers the whole recording and is not cut."
+            : "")
+        : null,
+    ].filter(Boolean);
 
     let sessionId: string | null = null;
     let cpuXmlPath: string | null = null;
@@ -229,8 +299,10 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
     const launchPhases = phases.filter((phase) => endNs === null || phase.startNs < endNs);
     ctx?.emitProgress?.({ type: "artifact", tracePath });
     return {
-      // Process start (first lifecycle phase) to the end of the first frame.
+      // Process start (first lifecycle phase) to the end of the first frame. Null on simulators.
       launchMs: endNs === null || phases.length === 0 ? null : ms(endNs - phases[0]!.startNs),
+      // Simulator only: earliest dyld activity to the first-frame signpost.
+      ...(context.simulator && { simulatorLaunchEstimateMs }),
       device: { id: context.deviceId, name: context.deviceName, simulator: context.simulator },
       bundleId: context.bundleId,
       // Trace-relative ms, the same clock as CPU sample times.
@@ -250,7 +322,7 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
         },
       }),
       ...(Object.keys(exportErrors).length > 0 && { exportErrors }),
-      ...(context.warning && { warning: context.warning }),
+      ...(notes.length > 0 && { warning: notes.join(" ") }),
     };
   },
 };

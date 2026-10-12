@@ -63,6 +63,80 @@ export function launchEndNs(phases: LifecyclePhase[]): number | null {
   return phases.find((phase) => phase.period === FOREGROUND_ACTIVE_PERIOD)?.startNs ?? null;
 }
 
+const LAUNCH_SIGNPOST_SUBSYSTEM = "com.apple.app_launch_measurement";
+const FIRST_FRAME_SIGNPOST = "ApplicationFirstFramePresentation";
+
+interface RowCell {
+  tag: string;
+  value: string;
+}
+
+/**
+ * Every cell of every row of an xctrace export, refs resolved. A cell's value is
+ * its text, else its `fmt`. Cells nested in a cell (a process's pid) come out as
+ * cells of their own, which is harmless for lookups by tag.
+ */
+function resolvedRows(xml: string): RowCell[][] {
+  const registry = new Map<string, string>();
+  const openTag = /<([\w-]+)\s+(?:id="(\d+)"([^>]*?)\/?>([^<]*)|ref="(\d+)")/g;
+  const rows: RowCell[][] = [];
+  for (const [row] of xml.matchAll(/<row>.*?<\/row>/gs)) {
+    const cells: RowCell[] = [];
+    for (const match of row.matchAll(openTag)) {
+      const [, tag, id, attrs, text, ref] = match;
+      let value: string | null;
+      if (ref !== undefined) {
+        value = registry.get(ref) ?? null;
+      } else {
+        const fmt = attrs!.match(/\bfmt="([^"]*)"/)?.[1];
+        value = decodeXml(text!.trim() || fmt || "");
+        registry.set(id!, value);
+      }
+      if (value !== null) cells.push({ tag: tag!, value });
+    }
+    rows.push(cells);
+  }
+  return rows;
+}
+
+/**
+ * Time of the first `ApplicationFirstFramePresentation` End signpost the system
+ * emits for the launched process, in trace-relative ns (the clock of CPU sample
+ * times). It exists on simulators too, where the lifecycle table stays empty.
+ * `processName` keeps signposts of other apps out; rows with no process cell pass.
+ */
+export function parseFirstFrameSignpostNs(xml: string, processName?: string): number | null {
+  let earliest: number | null = null;
+  for (const cells of resolvedRows(xml)) {
+    const values = cells.map((cell) => cell.value);
+    if (
+      !values.includes(LAUNCH_SIGNPOST_SUBSYSTEM) ||
+      !values.includes(FIRST_FRAME_SIGNPOST) ||
+      !cells.some((cell) => /event-type/.test(cell.tag) && cell.value === "End")
+    ) {
+      continue;
+    }
+    const process = cells.find((cell) => cell.tag === "process");
+    if (processName && process && !process.value.includes(processName)) continue;
+    const time = Number(cells.find((cell) => /time$/.test(cell.tag))?.value);
+    if (Number.isFinite(time) && (earliest === null || time < earliest)) earliest = time;
+  }
+  return earliest;
+}
+
+/** Earliest `start-time` among `dyld-activity-interval` rows, trace-relative ns. */
+export function earliestDyldStartNs(xml: string): number | null {
+  const registry = valueRegistry(xml, ["start-time"]);
+  let earliest: number | null = null;
+  for (const [row] of xml.matchAll(/<row>.*?<\/row>/gs)) {
+    const start = Number(rowValue(row, "start-time", registry));
+    if (rowValue(row, "start-time", registry) !== null && Number.isFinite(start)) {
+      earliest = earliest === null ? start : Math.min(earliest, start);
+    }
+  }
+  return earliest;
+}
+
 /**
  * Keeps `time-profile` rows up to the last sample inside the launch. Refs only
  * point back to earlier rows, so cutting the tail keeps every remaining ref

@@ -16,7 +16,9 @@ In a React Native app, the launch ends at the first frame, but React Native star
 
 Before each task, Argent runs the app once and then stops it. The next launch starts a new app process. Usually this is a warm launch, because parts of the app are still in memory. iOS can remove the app from memory at any time, so Argent cannot guarantee a warm launch. Argent does not measure a cold launch after a restart or a resume from the background.
 
-Measure on a physical iPhone when you need device performance. A simulator uses Mac hardware, so its timings can differ from iPhone timings. Argent uses a simulator only when you allow it.
+Measure on a physical iPhone when you need device performance. A simulator uses Mac hardware, so its timings can differ from iPhone timings. Argent uses a simulator only when you allow it. On a simulator, the Instruments recording has no lifecycle phases and runs slower than a normal launch. Use it for relative CPU analysis only.
+
+On iPhones with iOS 18, the measurement can return fewer than five samples, because XCTest loses some launch measurements. Argent reports how many samples it collected. Run the measurement again for a full set.
 
 Argent saves each run under `.argent/traces/<datetime>/` in the app project. The measurement keeps its Xcode result and logs. The Instruments run keeps the trace and its lifecycle and dyld exports. Argent keeps the CPU samples of the launch in the native profiler session.
 

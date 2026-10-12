@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   cpuTableXpath,
+  earliestDyldStartNs,
   launchEndNs,
+  parseFirstFrameSignpostNs,
   parseLifecyclePhases,
   truncateCpuXml,
 } from "../../src/utils/ios-launch-time/trace-exports";
@@ -125,5 +127,39 @@ describe("cpuTableXpath", () => {
 
   it("returns null without a time-profile table", () => {
     expect(cpuTableXpath('<table schema="time-sample"/>')).toBeNull();
+  });
+});
+
+// Shape of an `os-signpost` export: strings and processes are defined once and
+// referenced by later rows.
+const SIGNPOST = `<?xml version="1.0"?>
+<trace-query-result>
+<node><schema name="os-signpost"/>
+<row><event-time id="1" fmt="00:00.100">100000000</event-time><process id="2" fmt="Other (10)"><pid id="3" fmt="10">10</pid></process><os-signpost-event-type id="4" fmt="End">End</os-signpost-event-type><subsystem id="5" fmt="com.apple.app_launch_measurement">com.apple.app_launch_measurement</subsystem><category id="6" fmt="ApplicationLaunch">ApplicationLaunch</category><signpost-name id="7" fmt="ApplicationFirstFramePresentation">ApplicationFirstFramePresentation</signpost-name></row>
+<row><event-time id="8" fmt="00:00.400">400000000</event-time><process id="9" fmt="MyApp (20)"><pid id="10" fmt="20">20</pid></process><os-signpost-event-type ref="4"/><subsystem ref="5"/><category ref="6"/><signpost-name ref="7"/></row>
+<row><event-time id="11" fmt="00:00.435">435000000</event-time><process ref="9"/><os-signpost-event-type ref="4"/><subsystem ref="5"/><category ref="6"/><signpost-name id="12" fmt="ApplicationFirstFramePresentationResponsive">ApplicationFirstFramePresentationResponsive</signpost-name></row>
+<row><event-time id="13" fmt="00:00.300">300000000</event-time><process ref="9"/><os-signpost-event-type id="14" fmt="Begin">Begin</os-signpost-event-type><subsystem ref="5"/><category ref="6"/><signpost-name ref="7"/></row>
+</node></trace-query-result>`;
+
+describe("parseFirstFrameSignpostNs", () => {
+  it("takes the first-frame End row of the launched process, resolving refs", () => {
+    expect(parseFirstFrameSignpostNs(SIGNPOST, "MyApp")).toBe(400_000_000);
+  });
+
+  it("takes the earliest matching row when no process is given", () => {
+    expect(parseFirstFrameSignpostNs(SIGNPOST)).toBe(100_000_000);
+  });
+
+  it("returns null without a matching End signpost", () => {
+    expect(parseFirstFrameSignpostNs(SIGNPOST, "Missing")).toBeNull();
+    expect(parseFirstFrameSignpostNs("<trace-query-result></trace-query-result>")).toBeNull();
+  });
+});
+
+describe("earliestDyldStartNs", () => {
+  it("returns the smallest start across rows, resolving refs", () => {
+    const xml = `<node><row><start-time id="1">250000000</start-time></row><row><start-time id="2">120000000</start-time></row><row><start-time ref="1"/></row></node>`;
+    expect(earliestDyldStartNs(xml)).toBe(120_000_000);
+    expect(earliestDyldStartNs("<node/>")).toBeNull();
   });
 });

@@ -137,17 +137,35 @@ Both tools build the app in Release. Set `configuration` only when the Release c
 
 Both tools require `device_id` to select a connected iPhone. Set `allow_simulator: true` to use a booted simulator when no selected iPhone is available. Simulator timings use Mac hardware. Both tools build the app with its original bundle ID. Argent tries automatic signing and waits briefly for device unlock or trust actions. If the original bundle ID cannot be provisioned, Argent stops and reports the signing error.
 
-`ios-launch-time-measure` builds the Argent UI test runner in Release. The runner uses `XCTApplicationLaunchMetric` for five samples. Apple's metric includes the first frame and extended launch tasks. The result includes `averageMs`, `samplesMs`, and the `.xcresult` path.
+`ios-launch-time-measure` builds the Argent UI test runner in Release. The runner uses `XCTApplicationLaunchMetric` for five samples. Apple's metric includes the first frame and extended launch tasks. The result includes these fields:
+
+- `averageMs` and `medianMs`: the average and the median of the collected samples.
+- `samplesMs`: the collected samples.
+- `samplesCollected` and `samplesExpected`: the number of samples that XCTest returned and the number that Argent asks for (five).
+- `warning`: a note when samples are missing, and the simulator note.
+- The `.xcresult` path, the metrics path and the log path.
+
+On iPhones with iOS 18, XCTest loses some launch measurements. The cause is on the device, not in Argent. When `samplesCollected` is lower than `samplesExpected`, the average uses the remaining samples and `warning` explains this. Run the tool again for a full set. When XCTest loses the first measured launch, it discards the whole result and the tool fails with no samples. A new run usually returns samples. `ios-launch-time-profile` is an alternative. Simulators and iPhones with iOS 26 or later do not lose measurements in Argent tests. Argent does not retry automatically.
+
+Argent includes the Xcode version in the build cache key, so a build from another Xcode is not reused. When the free developer profile of the iPhone has no slot for the app or for the runner, Argent reports this and names a leftover Argent runner of another team when the error lists one.
 
 If Argent already has an active UI test runner on the selected iPhone, `ios-launch-time-measure` stops before the build. Run `stop-simulator-server` for that device, then retry the measurement.
 
-`ios-launch-time-profile` accepts `duration_seconds` from 5 to 60, with a default of 8. It records with the Instruments App Launch template. Argent ends the launch at the end of the `Launching - Initial Frame Rendering` phase. The result includes these fields:
+`ios-launch-time-profile` accepts `duration_seconds` from 5 to 60, with a default of 8. It records with the Instruments App Launch template. On an iPhone, Argent ends the launch at the end of the `Launching - Initial Frame Rendering` phase. The result includes these fields:
 
-- `launchMs`: the time from the start of the app process to the end of the first frame.
+- `launchMs`: the time from the start of the app process to the end of the first frame. It is `null` on a simulator.
 - `phases`: the lifecycle phases before the first frame, in milliseconds from the start of the trace.
 - `firstFrameEndMs`: the end of the launch, in milliseconds from the start of the trace.
+- `simulatorLaunchEstimateMs`: on a simulator only, the time from the first dyld activity to the first frame. It is a rough estimate.
+- `warning`: notes about the run.
 - `tracePath` and `exports`: the `.trace` bundle and the lifecycle and dyld XML exports.
 - `profilerSession`: a native profiler session with the CPU samples up to the first frame, and the path of its XML file.
+
+On a simulator, Instruments does not record lifecycle phases, so `phases` is empty. Argent adds the `os_signpost` instrument and ends the launch at the `ApplicationFirstFramePresentation` signpost that the system emits for the app. If the signpost is missing, the CPU session covers the whole recording and is not cut. Timings of a recording on a simulator are about two times slower than an uninstrumented launch and reflect Mac hardware. Use them for relative CPU analysis only.
+
+The sampling period of the App Launch template varies between 1 ms and 5 ms, so `cpuSamples` counts are not comparable between runs.
+
+Xcode 26.4.x has a known issue: `xctrace record --launch` on a simulator stalls after `Starting recording`. After 180 seconds, Argent stops the recording, terminates the app and reports the Xcode version and the record log. Use Xcode 26.3 or 27, or record on a physical iPhone.
 
 Load the session with `profiler-load` in `load_native` mode. Then run `profiler-stack-query` in `thread_breakdown` mode with `thread: "Main Thread"` to see the hot functions. The session file is an xctrace XML export, so the agent can also read it directly. The launch ends at the first frame. The session shows all work before the first frame, including React Native work such as runtime creation. Use the React profiler for work after the first frame.
 

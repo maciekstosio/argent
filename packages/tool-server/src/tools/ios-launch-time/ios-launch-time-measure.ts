@@ -13,14 +13,20 @@ import {
 import { IOS_DEVICE_RUNNER_NAMESPACE } from "../../blueprints/ios-device-runner";
 import {
   ensureLaunchDeviceReady,
+  freeProfileLimitMessage,
   launchBuildCacheDir,
   prepareLaunch,
   runLogged,
+  xcodeVersion,
 } from "../../utils/ios-launch-time/workflow";
 import { resolveRunnerProjectPath } from "../../utils/ios-device/runner-artifact";
 import { resolveRunnerSigningConfig } from "../../utils/ios-device/runner-signing";
 
 const execFileAsync = promisify(execFile);
+
+// Launches XCTest measures per run. Must match options.iterationCount in
+// ArgentLaunchPerformanceTests.swift.
+const LAUNCH_ITERATIONS = 5;
 
 const schema = z.object({
   workspace_path: z.string().describe("Absolute path to the iOS app project root."),
@@ -74,7 +80,7 @@ export function createIosLaunchTimeMeasureTool(
       failedMsg: ({ failureSignal }) => `Failed to measure iOS launch: ${failureSignal.error_code}`,
     },
     description:
-      "Run five launches of an iOS app on a connected iPhone and measure them with XCTApplicationLaunchMetric. Use when the user asks how long the app takes to launch, e.g. to set a baseline before an optimization or to verify a fix. Builds the app and Argent's XCUITest runner in Release and runs the app once first, so the launches are usually warm; iOS can still evict the app from memory. The default metric ends at the first frame, or later if the app registers extended launch tasks. Set `allow_simulator` only when Mac-hardware timings are acceptable. Does not edit the app project. Returns { averageMs, samplesMs, device, bundleId, resultPath, metricsPath, logPath }; results and build logs go to <workspace>/.argent/traces/<datetime>. Fails if no iPhone is connected by USB cable, the scheme cannot be resolved, the build fails, or Argent's device runner is active on the iPhone.",
+      "Run five launches of an iOS app on a connected iPhone and measure them with XCTApplicationLaunchMetric. Use when the user asks how long the app takes to launch, e.g. to set a baseline before an optimization or to verify a fix. Builds the app and Argent's XCUITest runner in Release and runs the app once first, so the launches are usually warm; iOS can still evict the app from memory. The default metric ends at the first frame, or later if the app registers extended launch tasks. Set `allow_simulator` only when Mac-hardware timings are acceptable. Does not edit the app project. On iOS 18 iPhones XCTest can drop some of the five measurements; the result then has fewer samples and a warning, and a run that loses the first one fails with no samples, so rerun. Returns { averageMs, medianMs, samplesMs, samplesCollected, samplesExpected, device, bundleId, resultPath, metricsPath, logPath, warning }; results and build logs go to <workspace>/.argent/traces/<datetime>. Fails if no iPhone is connected by USB cable, the scheme cannot be resolved, the build fails, or Argent's device runner is active on the iPhone.",
     zodSchema: schema,
     fileInputs,
     services: () => ({}),
@@ -119,7 +125,11 @@ export function createIosLaunchTimeMeasureTool(
       const runnerBundleId = runnerSigning?.appBundleId ?? "com.argent.runner.tsimulator";
       const testBundleId = runnerSigning?.testBundleId ?? `${runnerBundleId}.uitests`;
       const runnerBuildKey = createHash("sha256")
-        .update([context.destination, runnerBundleId, testBundleId, "Release"].join("\n"))
+        .update(
+          [context.destination, runnerBundleId, testBundleId, "Release", await xcodeVersion()].join(
+            "\n"
+          )
+        )
         .digest("hex")
         .slice(0, 16);
       const resultPath = path.join(context.runDir, "launch.xcresult");
@@ -168,14 +178,12 @@ export function createIosLaunchTimeMeasureTool(
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (message.includes("maximum number of installed apps using a free developer profile")) {
-          throw new Error(
-            "The iPhone's free developer profile has no slot for Argent's UI-test runner. " +
-              "Remove an app you choose or use a paid team. Argent did not remove another app. " +
-              `Log: ${runnerLog}`,
-            { cause: error }
-          );
-        }
+        const friendly = freeProfileLimitMessage(message, {
+          subject: "Argent's UI-test runner",
+          logPath: runnerLog,
+          ownBundleIdPrefix: runnerBundleId,
+        });
+        if (friendly) throw new Error(friendly, { cause: error });
         throw error;
       }
       const { stdout } = await execFileAsync(
@@ -195,9 +203,25 @@ export function createIosLaunchTimeMeasureTool(
         )?.measurements;
       if (!measurements?.length) {
         throw new Error(
-          `XCTest passed but xcresult had no app launch duration metric. See ${resultPath}.`
+          "XCTest passed but recorded no launch measurements. XCTest discards the whole result when " +
+            "the first measured launch loses its metric (XCTApplicationLaunchMetric returned no value). " +
+            "This is a known device-side issue, seen on iOS 18 iPhones. A rerun usually returns samples; " +
+            "ios-launch-time-profile is an alternative. " +
+            `Result: ${resultPath}. Log: ${runnerLog}`
         );
       }
+      const samplesCollected = measurements.length;
+      const dropped = LAUNCH_ITERATIONS - samplesCollected;
+      const warnings = [
+        context.warning,
+        dropped > 0
+          ? `XCTest dropped ${dropped} of ${LAUNCH_ITERATIONS} launch measurements (XCTApplicationLaunchMetric returned no value for some iterations; seen on iOS 18 devices). The average uses the remaining samples; rerun for a full set.`
+          : null,
+      ].filter(Boolean);
+      const sorted = [...measurements].sort((a, b) => a - b);
+      const middle = Math.floor(sorted.length / 2);
+      const median =
+        sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
       return {
         metric: "XCTApplicationLaunchMetric",
         device: { id: context.deviceId, name: context.deviceName, simulator: context.simulator },
@@ -205,11 +229,14 @@ export function createIosLaunchTimeMeasureTool(
         averageMs: Math.round(
           (measurements.reduce((sum, value) => sum + value, 0) / measurements.length) * 1000
         ),
+        medianMs: Math.round(median * 1000),
         samplesMs: measurements.map((value) => Math.round(value * 1000)),
+        samplesCollected,
+        samplesExpected: LAUNCH_ITERATIONS,
         resultPath,
         metricsPath,
         logPath: runnerLog,
-        warning: context.warning,
+        warning: warnings.length > 0 ? warnings.join(" ") : null,
       };
     },
   };

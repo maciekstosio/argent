@@ -24,6 +24,8 @@ const execFileAsync = promisify(execFile);
 // 15 minutes. The tools are long running and cancel through the abort signal,
 // so this only catches a hung xcodebuild.
 const BUILD_TIMEOUT_MS = 60 * 60_000;
+// `simctl bootstatus -b` blocks until the simulator has finished booting.
+const BOOTSTATUS_TIMEOUT_MS = 180_000;
 
 /**
  * DerivedData for launch builds, outside the app project so it never lands in
@@ -64,9 +66,45 @@ interface LaunchContext {
   warning: string | null;
 }
 
+const FREE_PROFILE_LIMIT = "maximum number of installed apps using a free developer profile";
+
+/** True when the text reports the free developer profile's installed-app cap. */
+export function isFreeProfileLimit(text: string): boolean {
+  return text.toLowerCase().includes(FREE_PROFILE_LIMIT);
+}
+
+/**
+ * The friendly error for the free-profile app cap, or null for other text.
+ * `ownBundleIdPrefix` is this run's Argent runner bundle ID; another
+ * `com.argent.runner.t<team>` among the listed bundle IDs is a likely leftover
+ * of a different team that the user can delete.
+ */
+export function freeProfileLimitMessage(
+  text: string,
+  options: { subject: string; logPath?: string; ownBundleIdPrefix?: string }
+): string | null {
+  if (!isFreeProfileLimit(text)) return null;
+  const own = options.ownBundleIdPrefix?.toLowerCase();
+  const leftover = [...new Set(text.match(/com\.argent\.runner\.t[a-z0-9]+/gi) ?? [])].find(
+    (id) => !own || id.toLowerCase() !== own
+  );
+  return (
+    `The iPhone's free developer profile has no slot for ${options.subject}. ` +
+    "Remove an app you choose or use a paid team. Argent did not remove another app. " +
+    (leftover
+      ? `${leftover} looks like a leftover Argent runner from a different team; you can delete it. `
+      : "") +
+    (options.logPath ? `Log: ${options.logPath}` : "")
+  ).trim();
+}
+
 function errorText(output: string, logPath: string): string {
-  const signingHint = resolveSigningHint(output);
-  return `${xcodebuildFailureSummary(output)}${signingHint ? `\n${signingHint}` : ""}\nFull log: ${logPath}`;
+  // The free-profile cap is not a signing problem; keep its line instead of a signing hint.
+  const freeProfileLines = isFreeProfileLimit(output)
+    ? output.split("\n").filter((line) => isFreeProfileLimit(line))
+    : [];
+  const signingHint = freeProfileLines.length > 0 ? null : resolveSigningHint(output);
+  return `${xcodebuildFailureSummary(output)}${freeProfileLines.length > 0 ? `\n${[...new Set(freeProfileLines)].join("\n")}` : ""}${signingHint ? `\n${signingHint}` : ""}\nFull log: ${logPath}`;
 }
 
 export async function runLogged(
@@ -134,11 +172,12 @@ async function smallCommand(
   command: string,
   args: string[],
   cwd: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  timeoutMs = 60_000
 ): Promise<string> {
   const { stdout } = await execFileAsync(command, args, {
     cwd,
-    timeout: 60_000,
+    timeout: timeoutMs,
     maxBuffer: 8 * 1024 * 1024,
     signal,
   });
@@ -391,14 +430,27 @@ export function assertResolvedConfiguration(
   }
 }
 
+/**
+ * `xcodebuild -version` on one line, "unknown-xcode" when it fails. Not cached:
+ * xcode-select can change while the tool-server runs.
+ */
+export function xcodeVersion(): Promise<string> {
+  return execFileAsync("xcodebuild", ["-version"], { timeout: 20_000 }).then(
+    ({ stdout }) => stdout.trim().replace(/\n/g, " "),
+    () => "unknown-xcode"
+  );
+}
+
+// A build made by another Xcode must not be reused, so the version is in the key.
 export function appBuildKey(
   container: string,
   scheme: string,
   destination: string,
-  configuration: string
+  configuration: string,
+  xcodeVersionText: string
 ): string {
   return createHash("sha256")
-    .update([container, scheme, destination, configuration].join("\n"))
+    .update([container, scheme, destination, configuration, xcodeVersionText].join("\n"))
     .digest("hex")
     .slice(0, 16);
 }
@@ -497,7 +549,13 @@ export async function prepareLaunch(
   await fsp.mkdir(path.dirname(runDir), { recursive: true });
   await fsp.mkdir(runDir);
   const configuration = request.configuration ?? "Release";
-  const buildKey = appBuildKey(container, scheme, device.destination, configuration);
+  const buildKey = appBuildKey(
+    container,
+    scheme,
+    device.destination,
+    configuration,
+    await xcodeVersion()
+  );
   const derivedDataPath = launchBuildCacheDir("app", buildKey);
   const settings = await appSettings(
     root,
@@ -541,6 +599,14 @@ export async function prepareLaunch(
     throw new Error(`${configuration} build succeeded but the app was not found at ${appPath}.`);
   }
   if (device.simulator) {
+    // A simulator that is still booting fails install and launch.
+    await smallCommand(
+      "xcrun",
+      [...simctlPrefix(device.deviceSet), "bootstatus", device.id, "-b"],
+      root,
+      signal,
+      BOOTSTATUS_TIMEOUT_MS
+    );
     await smallCommand(
       "xcrun",
       [...simctlPrefix(device.deviceSet), "install", device.id, appPath],
@@ -554,7 +620,18 @@ export async function prepareLaunch(
       signal
     );
   } else {
-    await waitForDeviceAction(() => installApp(device.id, appPath), onProgress, signal);
+    try {
+      await waitForDeviceAction(() => installApp(device.id, appPath), onProgress, signal);
+    } catch (error) {
+      const friendly = freeProfileLimitMessage(
+        error instanceof Error ? error.message : String(error),
+        {
+          subject: `the app ${settings.PRODUCT_BUNDLE_IDENTIFIER}`,
+        }
+      );
+      if (friendly) throw new Error(friendly, { cause: error });
+      throw error;
+    }
     await waitForDeviceAction(
       () => launchApp(device.id, settings.PRODUCT_BUNDLE_IDENTIFIER!, { terminateExisting: true }),
       onProgress,
@@ -657,4 +734,12 @@ export async function terminateForWarmLaunch(
     path.dirname(context.runDir),
     signal
   );
+}
+
+/**
+ * Best-effort stop of the launched app after a failed or stalled recording, so
+ * it is not left suspended. Errors are ignored and no abort signal applies.
+ */
+export async function terminateLaunchedApp(context: LaunchContext): Promise<void> {
+  await terminateForWarmLaunch(context).catch(() => undefined);
 }
