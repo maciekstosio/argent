@@ -72,7 +72,7 @@ interface LaunchContext {
 const FREE_PROFILE_LIMIT = "maximum number of installed apps using a free developer profile";
 
 /** True when the text reports the free developer profile's installed-app cap. */
-export function isFreeProfileLimit(text: string): boolean {
+function isFreeProfileLimit(text: string): boolean {
   return text.toLowerCase().includes(FREE_PROFILE_LIMIT);
 }
 
