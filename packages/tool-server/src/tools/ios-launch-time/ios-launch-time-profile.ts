@@ -26,9 +26,11 @@ import {
 } from "../../utils/ios-launch-time/trace-exports";
 import {
   coreExportFailureMessage,
+  deviceLaunchWindow,
   failedCoreExport,
   simulatorLaunchWindow,
   optionalExportCrashNote,
+  processCreationNote,
   simulatorProfileNote,
   stalledAtRecordingStart,
   stallsSimulatorLaunchRecording,
@@ -122,7 +124,7 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
       `Failed to record iOS App Launch: ${failureSignal.error_code}`,
   },
   description:
-    "Profile an iOS app launch with the Xcode Instruments App Launch template. Use when the launch is slow and you need to know which phases and functions run before the first frame, e.g. static initializers, dylib loading or didFinishLaunching work. Builds the app in Release and runs it once first, so the recorded launch is usually warm; iOS can still evict the app from memory. Set `allow_simulator` only when Mac-hardware timings are acceptable; on a simulator there are no phases or launchMs, the first frame comes from a system signpost, and simulatorLaunchEstimateMs is a rough estimate. cpuSamples counts differ between runs because the sampling period varies from 1 to 5 ms. Returns { launchMs, simulatorLaunchEstimateMs (simulator only), firstFrameEndMs, phases, tracePath, exports, profilerSession: { sessionId, cpuXml, cpuSamples, next }, exportErrors (when an optional lifecycle, dyld or signpost export failed), warning (null when there is nothing to note) }. The .trace and XML exports go to <workspace>/.argent/traces/<datetime>; profilerSession holds the CPU samples up to the first frame for profiler-load and profiler-stack-query. Fails if no iPhone is connected by USB cable, the scheme cannot be resolved, the build fails, xctrace cannot record the launch, or xctrace cannot export the trace table of contents, the CPU samples or, on an iPhone, the lifecycle phases; that error names the recorded tracePath, which opens in Instruments. Argent runs each xctrace export up to 3 times when xctrace crashes, as Xcode 26.4.1 xctrace does in most attempts; a crashed dyld or signpost export is named in warning. With Xcode 26.4.x on a simulator it fails before the build, because that Xcode stalls recording launches on simulators.",
+    "Profile an iOS app launch with the Xcode Instruments App Launch template. Use when the launch is slow and you need to know which phases and functions run before the first frame, e.g. static initializers, dylib loading or didFinishLaunching work. Builds the app in Release and runs it once first, so the recorded launch is usually warm; iOS can still evict the app from memory. Set `allow_simulator` only when Mac-hardware timings are acceptable; on a simulator there are no phases or launchMs, the first frame comes from a system signpost, and simulatorLaunchEstimateMs is a rough estimate. On an iPhone, launchMs runs from the start of dyld to the end of the first frame (from the first lifecycle phase after Process Creation when the dyld export failed); phases keeps Process Creation, which under xctrace includes the recording's attach time, and warning says so. cpuSamples counts differ between runs because the sampling period varies from 1 to 5 ms. Returns { launchMs, simulatorLaunchEstimateMs (simulator only), firstFrameEndMs, phases, tracePath, exports, profilerSession: { sessionId, cpuXml, cpuSamples, next }, exportErrors (when an optional lifecycle, dyld or signpost export failed), warning (null when there is nothing to note) }. The .trace and XML exports go to <workspace>/.argent/traces/<datetime>; profilerSession holds the CPU samples up to the first frame for profiler-load and profiler-stack-query. Fails if no iPhone is connected by USB cable, the scheme cannot be resolved, the build fails, xctrace cannot record the launch, or xctrace cannot export the trace table of contents, the CPU samples or, on an iPhone, the lifecycle phases; that error names the recorded tracePath, which opens in Instruments. Argent runs each xctrace export up to 3 times when xctrace crashes, as Xcode 26.4.1 xctrace does in most attempts; a crashed dyld or signpost export is named in warning. With Xcode 26.4.x on a simulator it fails before the build, because that Xcode stalls recording launches on simulators.",
   zodSchema: schema,
   fileInputs,
   services: () => ({}),
@@ -303,6 +305,10 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
     const phases = exported.lifecycle
       ? parseLifecyclePhases(await fsp.readFile(exported.lifecycle, "utf8"))
       : [];
+    // Optional on both targets: without it a device launch starts at the lifecycle phases.
+    const dyldStartNs = exported.dyld
+      ? earliestDyldStartNs(await fsp.readFile(exported.dyld, "utf8"))
+      : null;
     let endNs = launchEndNs(phases);
     let simulatorLaunchEstimateMs: number | null = null;
     let signpostMissing = false;
@@ -313,9 +319,6 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
             context.executableName
           )
         : null;
-      const dyldStartNs = exported.dyld
-        ? earliestDyldStartNs(await fsp.readFile(exported.dyld, "utf8"))
-        : null;
       ({ endNs, simulatorLaunchEstimateMs, signpostMissing } = simulatorLaunchWindow(
         signpostNs,
         dyldStartNs
@@ -324,10 +327,12 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
       exportErrors.lifecycle =
         "Lifecycle export has no first-frame phase; CPU samples are not cut.";
     }
+    const launch = context.simulator ? null : deviceLaunchWindow({ phases, dyldStartNs, endNs });
     const crashedOptional = [...crashedExports].filter((table) => table in exportErrors);
     const notes = [
       context.warning,
       context.simulator ? simulatorProfileNote(signpostMissing) : null,
+      launch ? processCreationNote(launch.processCreation, launch.startSource) : null,
       crashedOptional.length > 0
         ? optionalExportCrashNote(crashedOptional, await xcodeVersion())
         : null,
@@ -351,8 +356,8 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
     const launchPhases = phases.filter((phase) => endNs === null || phase.startNs < endNs);
     ctx?.emitProgress?.({ type: "artifact", tracePath });
     return {
-      // Process start (first lifecycle phase) to the end of the first frame. Null on simulators.
-      launchMs: endNs === null || phases.length === 0 ? null : ms(endNs - phases[0]!.startNs),
+      // Start of dyld (else the first phase after Process Creation) to the end of the first frame. Null on simulators.
+      launchMs: launch?.launchMs ?? null,
       // Simulator only: earliest dyld activity to the first-frame signpost.
       ...(context.simulator && { simulatorLaunchEstimateMs }),
       device: { id: context.deviceId, name: context.deviceName, simulator: context.simulator },

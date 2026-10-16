@@ -85,6 +85,64 @@ export function simulatorLaunchWindow(
   };
 }
 
+/**
+ * True for the "Initializing - Process Creation" lifecycle phase. The app-period
+ * value uses "-" and the narrative "–", so only the suffix is matched.
+ */
+function isProcessCreation(period: string): boolean {
+  return /process creation\s*$/i.test(period);
+}
+
+/**
+ * launchMs on an iPhone: from the start of dyld to the end of the first frame.
+ * `xctrace record --launch` spawns the app suspended while Instruments attaches,
+ * and Xcode 26.4 counts that wait in Process Creation, so that phase is skipped.
+ * The start is the earliest dyld activity, else the first lifecycle phase that
+ * is not Process Creation; a start after `endNs` is not used.
+ */
+export function deviceLaunchWindow(window: {
+  phases: Array<{ startNs: number; period: string }>;
+  dyldStartNs: number | null;
+  endNs: number | null;
+}): {
+  launchMs: number | null;
+  startNs: number | null;
+  startSource: "dyld" | "lifecycle" | null;
+  processCreation: boolean;
+} {
+  const { phases, dyldStartNs, endNs } = window;
+  const processCreation = phases.some((phase) => isProcessCreation(phase.period));
+  const candidates: Array<[number | null | undefined, "dyld" | "lifecycle"]> = [
+    [dyldStartNs, "dyld"],
+    [phases.find((phase) => !isProcessCreation(phase.period))?.startNs, "lifecycle"],
+  ];
+  for (const [startNs, startSource] of candidates) {
+    if (endNs !== null && startNs !== null && startNs !== undefined && startNs <= endNs) {
+      return { launchMs: ms(endNs - startNs), startNs, startSource, processCreation };
+    }
+  }
+  return { launchMs: null, startNs: null, startSource: null, processCreation };
+}
+
+/**
+ * The note a device profile adds when the trace has a Process Creation phase,
+ * which launchMs leaves out. Null without that phase.
+ */
+export function processCreationNote(
+  processCreation: boolean,
+  startSource: "dyld" | "lifecycle" | null
+): string | null {
+  if (!processCreation) return null;
+  return (
+    "Under xctrace the Initializing - Process Creation phase includes the time the recording takes to attach to the app, " +
+    (startSource === "dyld"
+      ? "so launchMs starts at dyld instead."
+      : startSource === "lifecycle"
+        ? "so launchMs starts at the next lifecycle phase instead (the dyld export is missing)."
+        : "so launchMs does not include it.")
+  );
+}
+
 /** The note a simulator profile adds to its warning. */
 export function simulatorProfileNote(signpostMissing: boolean): string {
   return (

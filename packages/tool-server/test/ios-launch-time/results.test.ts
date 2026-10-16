@@ -1,14 +1,23 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   coreExportFailureMessage,
+  deviceLaunchWindow,
   failedCoreExport,
   launchSampleStats,
   optionalExportCrashNote,
+  processCreationNote,
   simulatorLaunchWindow,
   simulatorProfileNote,
   stalledAtRecordingStart,
   stallsSimulatorLaunchRecording,
 } from "../../src/utils/ios-launch-time/results";
+import {
+  earliestDyldStartNs,
+  launchEndNs,
+  parseLifecyclePhases,
+} from "../../src/utils/ios-launch-time/trace-exports";
 import { parseXcodeVersion } from "../../src/utils/ios-profiler/capture-strategy/select";
 
 describe("launchSampleStats", () => {
@@ -110,6 +119,106 @@ describe("simulatorLaunchWindow", () => {
       simulatorLaunchEstimateMs: null,
       signpostMissing: true,
     });
+  });
+});
+
+// Real physical-device exports of the same app on the same iPhone: the full
+// lifecycle tables and the first rows of the dyld tables.
+function realTrace(xcode: "26.4.1" | "27.0") {
+  const fixture = (table: string) =>
+    readFileSync(
+      join(__dirname, "..", "fixtures", "ios-launch-time", `xcode-${xcode}-${table}.xml`),
+      "utf8"
+    );
+  const phases = parseLifecyclePhases(fixture("lifecycle"));
+  return { phases, dyldStartNs: earliestDyldStartNs(fixture("dyld")), endNs: launchEndNs(phases) };
+}
+
+describe("deviceLaunchWindow", () => {
+  it("starts at dyld, not at the Process Creation phase of Xcode 26.4.1", () => {
+    const trace = realTrace("26.4.1");
+    expect(trace.phases[0]!.period).toBe("Initializing - Process Creation");
+    expect(trace.dyldStartNs).toBe(403_229_208);
+    expect(trace.endNs).toBe(656_882_708);
+    expect(deviceLaunchWindow(trace)).toEqual({
+      launchMs: 253.7,
+      startNs: 403_229_208,
+      startSource: "dyld",
+      processCreation: true,
+    });
+  });
+
+  it("starts at dyld on Xcode 27.0, which records no Process Creation phase", () => {
+    const trace = realTrace("27.0");
+    expect(trace.phases.some((phase) => phase.period.includes("Process Creation"))).toBe(false);
+    expect(deviceLaunchWindow(trace)).toEqual({
+      launchMs: 264.5,
+      startNs: 443_451_000,
+      startSource: "dyld",
+      processCreation: false,
+    });
+  });
+
+  it("falls back to the first phase after Process Creation without dyld", () => {
+    expect(deviceLaunchWindow({ ...realTrace("26.4.1"), dyldStartNs: null })).toEqual({
+      launchMs: 257.7,
+      startNs: 399_150_333,
+      startSource: "lifecycle",
+      processCreation: true,
+    });
+    expect(deviceLaunchWindow({ ...realTrace("27.0"), dyldStartNs: null })).toMatchObject({
+      launchMs: 268.5,
+      startNs: 439_406_583,
+      startSource: "lifecycle",
+    });
+  });
+
+  it("matches Process Creation by suffix, with either dash", () => {
+    const window = deviceLaunchWindow({
+      phases: [
+        { startNs: 0, period: "Initializing \u2013 Process Creation" },
+        { startNs: 100_000_000, period: "Initializing - Static Runtime Initialization" },
+      ],
+      dyldStartNs: null,
+      endNs: 300_000_000,
+    });
+    expect(window).toMatchObject({ launchMs: 200, processCreation: true });
+  });
+
+  it("does not use a start after the end of the first frame", () => {
+    const trace = realTrace("27.0");
+    expect(deviceLaunchWindow({ ...trace, dyldStartNs: trace.endNs! + 1 })).toMatchObject({
+      launchMs: 268.5,
+      startSource: "lifecycle",
+    });
+  });
+
+  it("is null without a first frame or without any start", () => {
+    expect(deviceLaunchWindow({ ...realTrace("26.4.1"), endNs: null })).toEqual({
+      launchMs: null,
+      startNs: null,
+      startSource: null,
+      processCreation: true,
+    });
+    expect(
+      deviceLaunchWindow({
+        phases: [{ startNs: 0, period: "Initializing - Process Creation" }],
+        dyldStartNs: null,
+        endNs: 300_000_000,
+      }).launchMs
+    ).toBeNull();
+  });
+});
+
+describe("processCreationNote", () => {
+  it("is null without a Process Creation phase", () => {
+    expect(processCreationNote(false, "dyld")).toBeNull();
+  });
+
+  it("names the attach time and where launchMs starts", () => {
+    expect(processCreationNote(true, "dyld")).toContain("attach");
+    expect(processCreationNote(true, "dyld")).toContain("starts at dyld");
+    expect(processCreationNote(true, "lifecycle")).toContain("dyld export is missing");
   });
 });
 
