@@ -14,17 +14,18 @@ import {
 } from "../ios-device/devicectl";
 import { listIosSimulators } from "../ios-devices";
 import { simctlPrefix } from "../ios-device-sets";
-import { resolveSigningHint } from "../ios-device/runner-signing";
+import { resolveRunnerSigningConfig, resolveSigningHint } from "../ios-device/runner-signing";
 import { detectSigningTeams } from "../ios-device/team-detect";
 import { xcodebuildFailureSummary } from "../ios-device/runner-artifact";
-import { signalGroup } from "../process-kill";
+import { scheduleGroupSigkill, signalGroup } from "../process-kill";
 
 const execFileAsync = promisify(execFile);
 // A clean Release build of a large app (many pods, Hermes bytecode) can pass
 // 15 minutes. The tools are long running and cancel through the abort signal,
 // so this only catches a hung xcodebuild.
 const BUILD_TIMEOUT_MS = 60 * 60_000;
-// `simctl bootstatus -b` blocks until the simulator has finished booting.
+// `simctl bootstatus -b` boots the simulator if it is not booted, then waits
+// until it has finished booting.
 const BOOTSTATUS_TIMEOUT_MS = 180_000;
 
 /**
@@ -48,6 +49,8 @@ interface LaunchRequest {
   allowSimulator?: boolean;
   /** Xcode configuration for the app. Defaults to "Release". */
   configuration?: string;
+  /** Runs once the device is selected, before the build; throw to stop early. */
+  checkDevice?: (device: { simulator: boolean }) => Promise<void>;
 }
 
 interface LaunchContext {
@@ -74,10 +77,28 @@ export function isFreeProfileLimit(text: string): boolean {
 }
 
 /**
+ * Bundle IDs that the free-profile cap error lists as installed. Xcode and
+ * devicectl print them on the lines after the cap text, inside `{( ... )}`,
+ * each with its team prefix ("5W6H93822S.com.argent.runner.t5w6h93822s...").
+ * Without that block, the cap lines themselves are scanned.
+ */
+function installedAppText(text: string): string {
+  const blocks = [...text.matchAll(/free developer profile[^\n]*?\{\(([\s\S]*?)\)\}/gi)].map(
+    (match) => match[1]!
+  );
+  if (blocks.length > 0) return blocks.join("\n");
+  return text
+    .split("\n")
+    .filter((line) => isFreeProfileLimit(line))
+    .join("\n");
+}
+
+/**
  * The friendly error for the free-profile app cap, or null for other text.
- * `ownBundleIdPrefix` is this run's Argent runner bundle ID; another
- * `com.argent.runner.t<team>` among the listed bundle IDs is a likely leftover
- * of a different team that the user can delete.
+ * `text` should be the full failure output, so the installed bundle IDs that
+ * follow the cap line are in it. `ownBundleIdPrefix` is this setup's Argent
+ * runner bundle ID; when it is known, another `com.argent.runner.t<team>` among
+ * the installed apps is a likely leftover of a different team.
  */
 export function freeProfileLimitMessage(
   text: string,
@@ -85,17 +106,37 @@ export function freeProfileLimitMessage(
 ): string | null {
   if (!isFreeProfileLimit(text)) return null;
   const own = options.ownBundleIdPrefix?.toLowerCase();
-  const leftover = [...new Set(text.match(/com\.argent\.runner\.t[a-z0-9]+/gi) ?? [])].find(
-    (id) => !own || id.toLowerCase() !== own
-  );
+  // The match drops the team prefix and the `.uitests.xctrunner` suffix.
+  const runners = [
+    ...new Set(
+      (installedAppText(text).match(/com\.argent\.runner\.t[a-z0-9]+/gi) ?? []).map((id) =>
+        id.toLowerCase()
+      )
+    ),
+  ];
+  const leftover = runners.find((id) => id !== own);
+  const leftoverHint = !leftover
+    ? ""
+    : own
+      ? `${leftover} looks like a leftover Argent runner from a different team; you can delete it. `
+      : `${leftover} is an installed Argent runner; delete it if no Argent setup on this Mac still uses it. `;
   return (
     `The iPhone's free developer profile has no slot for ${options.subject}. ` +
     "Remove an app you choose or use a paid team. Argent did not remove another app. " +
-    (leftover
-      ? `${leftover} looks like a leftover Argent runner from a different team; you can delete it. `
-      : "") +
+    leftoverHint +
     (options.logPath ? `Log: ${options.logPath}` : "")
   ).trim();
+}
+
+/**
+ * The full text of a devicectl failure. The error message holds only the first
+ * stderr line; the rest, such as the bundle IDs of the free-profile cap, is in
+ * the stderr of the underlying execFile error.
+ */
+export function deviceErrorText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const stderr = (error as { cause?: { stderr?: unknown } } | null)?.cause?.stderr;
+  return typeof stderr === "string" && stderr ? `${message}\n${stderr}` : message;
 }
 
 function errorText(output: string, logPath: string): string {
@@ -106,6 +147,19 @@ function errorText(output: string, logPath: string): string {
   const signingHint = freeProfileLines.length > 0 ? null : resolveSigningHint(output);
   return `${xcodebuildFailureSummary(output)}${freeProfileLines.length > 0 ? `\n${[...new Set(freeProfileLines)].join("\n")}` : ""}${signingHint ? `\n${signingHint}` : ""}\nFull log: ${logPath}`;
 }
+
+/** Thrown by {@link runLogged} when the command ran past its timeout and was killed. */
+export class CommandTimeoutError extends Error {
+  readonly timedOut = true;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "CommandTimeoutError";
+  }
+}
+
+// How long an aborted command gets to exit on SIGTERM before SIGKILL.
+const ABORT_KILL_GRACE_MS = 5_000;
 
 export async function runLogged(
   command: string,
@@ -137,7 +191,10 @@ export async function runLogged(
   child.stdout?.on("data", collect);
   child.stderr?.on("data", collect);
   const stop = () => {
-    if (child.pid) signalGroup(child.pid, "SIGTERM");
+    if (!child.pid) return;
+    signalGroup(child.pid, "SIGTERM");
+    // xctrace ignores SIGTERM and SIGINT while it is stalled.
+    scheduleGroupSigkill(child.pid, ABORT_KILL_GRACE_MS, { gateOnGroupLiveness: true });
   };
   options.signal?.addEventListener("abort", stop, { once: true });
   if (options.signal?.aborted) stop();
@@ -154,7 +211,7 @@ export async function runLogged(
     });
     options.signal?.throwIfAborted();
     if (timedOut) {
-      throw new Error(
+      throw new CommandTimeoutError(
         `${command} timed out after ${Math.round(timeoutMs / 1000)} s and was killed. Full log: ${options.logPath}`
       );
     }
@@ -542,6 +599,7 @@ export async function prepareLaunch(
     throw new Error(`workspace_path is not a directory: ${root}`);
   }
   const device = await selectDevice(request, onProgress, signal);
+  await request.checkDevice?.(device);
   const container = await findContainer(root, request.xcodeContainer);
   const scheme = await selectScheme(container, root, request.scheme, signal);
   const timestamp = new Date().toISOString().replace(/[-:.]/g, "");
@@ -623,12 +681,15 @@ export async function prepareLaunch(
     try {
       await waitForDeviceAction(() => installApp(device.id, appPath), onProgress, signal);
     } catch (error) {
-      const friendly = freeProfileLimitMessage(
-        error instanceof Error ? error.message : String(error),
-        {
-          subject: `the app ${settings.PRODUCT_BUNDLE_IDENTIFIER}`,
-        }
-      );
+      const text = deviceErrorText(error);
+      // Only the runner's own ID tells a leftover runner from the current one.
+      const runner = isFreeProfileLimit(text)
+        ? await resolveRunnerSigningConfig().catch(() => null)
+        : null;
+      const friendly = freeProfileLimitMessage(text, {
+        subject: `the app ${settings.PRODUCT_BUNDLE_IDENTIFIER}`,
+        ownBundleIdPrefix: runner?.appBundleId,
+      });
       if (friendly) throw new Error(friendly, { cause: error });
       throw error;
     }
@@ -736,10 +797,17 @@ export async function terminateForWarmLaunch(
   );
 }
 
+// Bounds the cleanup, whose device path alone could otherwise take 90 s.
+const TERMINATE_LAUNCHED_APP_TIMEOUT_MS = 15_000;
+
 /**
- * Best-effort stop of the launched app after a failed or stalled recording, so
- * it is not left suspended. Errors are ignored and no abort signal applies.
+ * Best-effort stop of the launched app after a failed, stalled or cancelled
+ * recording, so it is not left suspended. Errors are ignored. It ignores the
+ * tool's abort signal and gives up after 15 s.
  */
 export async function terminateLaunchedApp(context: LaunchContext): Promise<void> {
-  await terminateForWarmLaunch(context).catch(() => undefined);
+  await terminateForWarmLaunch(
+    context,
+    AbortSignal.timeout(TERMINATE_LAUNCHED_APP_TIMEOUT_MS)
+  ).catch(() => undefined);
 }

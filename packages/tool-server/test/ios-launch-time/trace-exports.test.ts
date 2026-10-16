@@ -130,24 +130,52 @@ describe("cpuTableXpath", () => {
   });
 });
 
-// Shape of an `os-signpost` export: strings and processes are defined once and
-// referenced by later rows.
+// Shape of a real simulator `os-signpost` export: the process cell is
+// "<name> (<pid>)" with a nested pid, first defined inside the thread cell and
+// then referenced; only End rows exist; there are sentinel cells.
 const SIGNPOST = `<?xml version="1.0"?>
 <trace-query-result>
 <node><schema name="os-signpost"/>
-<row><event-time id="1" fmt="00:00.100">100000000</event-time><process id="2" fmt="Other (10)"><pid id="3" fmt="10">10</pid></process><os-signpost-event-type id="4" fmt="End">End</os-signpost-event-type><subsystem id="5" fmt="com.apple.app_launch_measurement">com.apple.app_launch_measurement</subsystem><category id="6" fmt="ApplicationLaunch">ApplicationLaunch</category><signpost-name id="7" fmt="ApplicationFirstFramePresentation">ApplicationFirstFramePresentation</signpost-name></row>
-<row><event-time id="8" fmt="00:00.400">400000000</event-time><process id="9" fmt="MyApp (20)"><pid id="10" fmt="20">20</pid></process><os-signpost-event-type ref="4"/><subsystem ref="5"/><category ref="6"/><signpost-name ref="7"/></row>
-<row><event-time id="11" fmt="00:00.435">435000000</event-time><process ref="9"/><os-signpost-event-type ref="4"/><subsystem ref="5"/><category ref="6"/><signpost-name id="12" fmt="ApplicationFirstFramePresentationResponsive">ApplicationFirstFramePresentationResponsive</signpost-name></row>
-<row><event-time id="13" fmt="00:00.300">300000000</event-time><process ref="9"/><os-signpost-event-type id="14" fmt="Begin">Begin</os-signpost-event-type><subsystem ref="5"/><category ref="6"/><signpost-name ref="7"/></row>
+<row><event-time id="1" fmt="00:00.100.000">100000000</event-time><thread id="2" fmt="Main Thread 0x1a2b (AppleSpell, pid: 123)"><tid id="3" fmt="0x1a2b">6699</tid><process id="4" fmt="AppleSpell (123)"><pid id="5" fmt="123">123</pid></process></thread><process ref="4"/><event-type id="6" fmt="End">End</event-type><sentinel/><subsystem id="7" fmt="com.apple.app_launch_measurement">com.apple.app_launch_measurement</subsystem><category id="8" fmt="ApplicationLaunch">ApplicationLaunch</category><signpost-name id="9" fmt="ApplicationFirstFramePresentation">ApplicationFirstFramePresentation</signpost-name><sentinel/></row>
+<row><event-time id="10" fmt="00:00.350.000">350000000</event-time><thread id="11" fmt="Main Thread 0x3c4d (Ledger, pid: 14775)"><tid id="12" fmt="0x3c4d">7788</tid><process id="13" fmt="Ledger (14775)"><pid id="14" fmt="14775">14775</pid></process></thread><process ref="13"/><event-type ref="6"/><sentinel/><subsystem ref="7"/><category ref="8"/><signpost-name id="15" fmt="ApplicationFirstFramePresentationResponsive">ApplicationFirstFramePresentationResponsive</signpost-name><sentinel/></row>
+<row><event-time id="16" fmt="00:00.400.000">400000000</event-time><thread ref="11"/><process ref="13"/><event-type ref="6"/><sentinel/><subsystem ref="7"/><category ref="8"/><signpost-name ref="9"/><sentinel/></row>
 </node></trace-query-result>`;
 
 describe("parseFirstFrameSignpostNs", () => {
   it("takes the first-frame End row of the launched process, resolving refs", () => {
-    expect(parseFirstFrameSignpostNs(SIGNPOST, "MyApp")).toBe(400_000_000);
+    expect(parseFirstFrameSignpostNs(SIGNPOST, "Ledger")).toBe(400_000_000);
+  });
+
+  it("matches the process name, not a prefix of another process", () => {
+    // "App" is a prefix of "AppleSpell (123)" but not that process's name.
+    expect(parseFirstFrameSignpostNs(SIGNPOST, "App")).toBeNull();
+    expect(parseFirstFrameSignpostNs(SIGNPOST, "AppleSpell")).toBe(100_000_000);
+    expect(parseFirstFrameSignpostNs(SIGNPOST, "Ledg")).toBeNull();
+  });
+
+  it("escapes regex characters in the process name", () => {
+    const dotted = SIGNPOST.replace(/Ledger \(14775\)/, "My.App (14775)");
+    expect(parseFirstFrameSignpostNs(dotted, "My.App")).toBe(400_000_000);
+    expect(parseFirstFrameSignpostNs(dotted, "My.Ap")).toBeNull();
+    expect(
+      parseFirstFrameSignpostNs(SIGNPOST.replace(/Ledger \(14775\)/, "MyXApp (14775)"), "My.App")
+    ).toBeNull();
+  });
+
+  it("ignores the ApplicationFirstFramePresentationResponsive signpost", () => {
+    // The Responsive row of Ledger (350 ms) is earlier than its first frame.
+    expect(parseFirstFrameSignpostNs(SIGNPOST, "Ledger")).not.toBe(350_000_000);
+    const responsiveOnly = SIGNPOST.replace(/<row><event-time id="16".*?<\/row>/s, "");
+    expect(parseFirstFrameSignpostNs(responsiveOnly, "Ledger")).toBeNull();
   });
 
   it("takes the earliest matching row when no process is given", () => {
     expect(parseFirstFrameSignpostNs(SIGNPOST)).toBe(100_000_000);
+  });
+
+  it("keeps rows that have no process cell", () => {
+    const noProcess = `<node><row><event-time id="1">250000000</event-time><event-type id="2" fmt="End">End</event-type><subsystem id="3">com.apple.app_launch_measurement</subsystem><signpost-name id="4">ApplicationFirstFramePresentation</signpost-name></row></node>`;
+    expect(parseFirstFrameSignpostNs(noProcess, "Ledger")).toBe(250_000_000);
   });
 
   it("returns null without a matching End signpost", () => {

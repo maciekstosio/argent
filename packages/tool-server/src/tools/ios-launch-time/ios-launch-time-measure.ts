@@ -19,6 +19,7 @@ import {
   runLogged,
   xcodeVersion,
 } from "../../utils/ios-launch-time/workflow";
+import { launchSampleStats } from "../../utils/ios-launch-time/results";
 import { resolveRunnerProjectPath } from "../../utils/ios-device/runner-artifact";
 import { resolveRunnerSigningConfig } from "../../utils/ios-device/runner-signing";
 
@@ -178,7 +179,9 @@ export function createIosLaunchTimeMeasureTool(
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const friendly = freeProfileLimitMessage(message, {
+        // The message keeps only the cap line; the installed bundle IDs follow it in the log.
+        const log = await fsp.readFile(runnerLog, "utf8").catch(() => message);
+        const friendly = freeProfileLimitMessage(log, {
           subject: "Argent's UI-test runner",
           logPath: runnerLog,
           ownBundleIdPrefix: runnerBundleId,
@@ -201,37 +204,32 @@ export function createIosLaunchTimeMeasureTool(
           (metric) =>
             metric.identifier === "com.apple.dt.XCTMetric_ApplicationLaunch-AppLaunch.duration"
         )?.measurements;
-      if (!measurements?.length) {
+      const stats = launchSampleStats(measurements ?? [], {
+        expected: LAUNCH_ITERATIONS,
+        simulator: context.simulator,
+      });
+      if (!stats) {
         throw new Error(
-          "XCTest passed but recorded no launch measurements. XCTest discards the whole result when " +
-            "the first measured launch loses its metric (XCTApplicationLaunchMetric returned no value). " +
-            "This is a known device-side issue, seen on iOS 18 iPhones. A rerun usually returns samples; " +
-            "ios-launch-time-profile is an alternative. " +
-            `Result: ${resultPath}. Log: ${runnerLog}`
+          context.simulator
+            ? "XCTest passed but recorded no launch measurements (XCTApplicationLaunchMetric returned no value). " +
+                "Rerun the measurement; ios-launch-time-profile is an alternative. " +
+                `Result: ${resultPath}. Log: ${runnerLog}`
+            : "XCTest passed but recorded no launch measurements. XCTest discards the whole result when " +
+                "the first measured launch loses its metric (XCTApplicationLaunchMetric returned no value). " +
+                "This is a known device-side issue, seen on iOS 18 iPhones. A rerun usually returns samples; " +
+                "ios-launch-time-profile is an alternative. " +
+                `Result: ${resultPath}. Log: ${runnerLog}`
         );
       }
-      const samplesCollected = measurements.length;
-      const dropped = LAUNCH_ITERATIONS - samplesCollected;
-      const warnings = [
-        context.warning,
-        dropped > 0
-          ? `XCTest dropped ${dropped} of ${LAUNCH_ITERATIONS} launch measurements (XCTApplicationLaunchMetric returned no value for some iterations; seen on iOS 18 devices). The average uses the remaining samples; rerun for a full set.`
-          : null,
-      ].filter(Boolean);
-      const sorted = [...measurements].sort((a, b) => a - b);
-      const middle = Math.floor(sorted.length / 2);
-      const median =
-        sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
+      const warnings = [context.warning, stats.warning].filter(Boolean);
       return {
         metric: "XCTApplicationLaunchMetric",
         device: { id: context.deviceId, name: context.deviceName, simulator: context.simulator },
         bundleId: context.bundleId,
-        averageMs: Math.round(
-          (measurements.reduce((sum, value) => sum + value, 0) / measurements.length) * 1000
-        ),
-        medianMs: Math.round(median * 1000),
-        samplesMs: measurements.map((value) => Math.round(value * 1000)),
-        samplesCollected,
+        averageMs: stats.averageMs,
+        medianMs: stats.medianMs,
+        samplesMs: stats.samplesMs,
+        samplesCollected: stats.samplesCollected,
         samplesExpected: LAUNCH_ITERATIONS,
         resultPath,
         metricsPath,

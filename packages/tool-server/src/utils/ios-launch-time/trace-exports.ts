@@ -103,9 +103,13 @@ function resolvedRows(xml: string): RowCell[][] {
  * Time of the first `ApplicationFirstFramePresentation` End signpost the system
  * emits for the launched process, in trace-relative ns (the clock of CPU sample
  * times). It exists on simulators too, where the lifecycle table stays empty.
- * `processName` keeps signposts of other apps out; rows with no process cell pass.
+ * `processName` keeps signposts of other apps out by matching the process
+ * column, formatted "<name> (<pid>)"; rows with no process cell pass.
  */
 export function parseFirstFrameSignpostNs(xml: string, processName?: string): number | null {
+  const processPattern = processName
+    ? new RegExp(`^${processName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(`)
+    : null;
   let earliest: number | null = null;
   for (const cells of resolvedRows(xml)) {
     const values = cells.map((cell) => cell.value);
@@ -117,7 +121,7 @@ export function parseFirstFrameSignpostNs(xml: string, processName?: string): nu
       continue;
     }
     const process = cells.find((cell) => cell.tag === "process");
-    if (processName && process && !process.value.includes(processName)) continue;
+    if (processPattern && process && !processPattern.test(process.value)) continue;
     const time = Number(cells.find((cell) => /time$/.test(cell.tag))?.value);
     if (Number.isFinite(time) && (earliest === null || time < earliest)) earliest = time;
   }

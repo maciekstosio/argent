@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRegistry } from "../../src/utils/setup-registry";
@@ -8,6 +8,8 @@ import {
   appBuildArgs,
   appBuildKey,
   assertResolvedConfiguration,
+  CommandTimeoutError,
+  deviceErrorText,
   freeProfileLimitMessage,
   iosAppTargets,
   launchBuildCacheDir,
@@ -39,6 +41,36 @@ it("stops a logged subprocess when its tool request is cancelled", async () => {
   });
   setTimeout(() => controller.abort(), 100);
   await expect(work).rejects.toMatchObject({ name: "AbortError" });
+});
+
+it("kills a cancelled subprocess that ignores SIGTERM after the grace period", async () => {
+  directory = await mkdtemp(join(tmpdir(), "argent-launch-abort-kill-"));
+  const logPath = join(directory, "child.log");
+  const controller = new AbortController();
+  const work = runLogged(
+    process.execPath,
+    ["-e", "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000)"],
+    { cwd: directory, logPath, signal: controller.signal }
+  );
+  // Abort only once the SIGTERM handler is installed.
+  while (!(await readFile(logPath, "utf8").catch(() => "")).includes("ready")) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const started = Date.now();
+  controller.abort();
+  await expect(work).rejects.toMatchObject({ name: "AbortError" });
+  expect(Date.now() - started).toBeLessThan(7_000);
+}, 15_000);
+
+it("marks a subprocess that runs past its timeout", async () => {
+  directory = await mkdtemp(join(tmpdir(), "argent-launch-timeout-"));
+  const error = await runLogged(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    cwd: directory,
+    logPath: join(directory, "child.log"),
+    timeoutMs: 200,
+  }).catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(CommandTimeoutError);
+  expect((error as CommandTimeoutError).timedOut).toBe(true);
 });
 
 it("passes the requested configuration to xcodebuild", () => {
@@ -75,6 +107,22 @@ it("keeps build caches of different Xcode versions apart", () => {
 describe("freeProfileLimitMessage", () => {
   const cap =
     "This device has reached the maximum number of installed apps using a free developer profile.";
+  // Trimmed from a real xcodebuild log: the installed IDs follow the cap line
+  // inside `{( ... )}`, each with its team prefix. The own runner of that run
+  // was com.argent.runner.t5dpz5ekad8; t5w6h93822s was a leftover of another team.
+  const xcodebuildLog = `Testing failed:
+\tUnable to Install “ArgentRunnerUITests-Runner”
+Recovery Suggestion: This device has reached the maximum number of installed apps using a free developer profile: {(
+    "5DPZ5EKAD8.com.maciekstosio.ttiledgerapp",
+    "2D63C2YCBH.org.reactjs.native.example.--PRODUCT-NAME-rfc1034identifier-oskar",
+    "5W6H93822S.com.argent.runner.t5w6h93822s.uitests.xctrunner"
+)}
+User Info: {
+    DVTErrorCreationDateKey = "2026-10-09 11:39:54 +0000";
+    IDERunOperationFailingWorker = IDEInstallCoreDeviceWorker;
+}
+    ARGENT_RUNNER_APP_BUNDLE_ID=com.argent.runner.t5dpz5ekad8
+** TEST FAILED **`;
 
   it("ignores text without the free-profile cap", () => {
     expect(
@@ -89,24 +137,56 @@ describe("freeProfileLimitMessage", () => {
     expect(message).not.toContain("leftover");
   });
 
-  it("names an Argent runner of another team as a leftover", () => {
-    const text = `${cap} Installed: com.example.app, com.argent.runner.tabc123, com.argent.runner.tmine99.uitests`;
-    const message = freeProfileLimitMessage(text, {
+  it("names a team-prefixed Argent runner of another team from the installed list", () => {
+    const message = freeProfileLimitMessage(xcodebuildLog, {
       subject: "the runner",
       logPath: "/l",
-      ownBundleIdPrefix: "com.argent.runner.tMINE99",
+      ownBundleIdPrefix: "com.argent.runner.t5dpz5ekad8",
     });
-    expect(message).toContain("com.argent.runner.tabc123 looks like a leftover");
-    expect(message).not.toContain("tmine99 looks");
+    expect(message).toContain(
+      "com.argent.runner.t5w6h93822s looks like a leftover Argent runner from a different team"
+    );
+    expect(message).not.toContain("t5dpz5ekad8");
   });
 
   it("does not call the own runner a leftover", () => {
-    const message = freeProfileLimitMessage(`${cap} com.argent.runner.tmine99`, {
+    const message = freeProfileLimitMessage(xcodebuildLog, {
       subject: "the runner",
       logPath: "/l",
-      ownBundleIdPrefix: "com.argent.runner.tmine99",
+      ownBundleIdPrefix: "com.argent.runner.T5W6H93822S",
     });
-    expect(message).not.toContain("leftover");
+    expect(message).not.toContain("t5w6h93822s");
+    // The own runner's ID outside the installed list is not a leftover either.
+    expect(message).not.toContain("t5dpz5ekad8");
+  });
+
+  it("does not claim a different team when the own runner is unknown", () => {
+    const message = freeProfileLimitMessage(xcodebuildLog, { subject: "the app" });
+    expect(message).toContain("com.argent.runner.t5w6h93822s is an installed Argent runner");
+    expect(message).not.toContain("different team");
+  });
+
+  it("reads the installed IDs from a multi-line devicectl install failure", () => {
+    // runDevicectl keeps only the first stderr line in the message; the rest
+    // stays in the stderr of the execFile error it wraps as the cause.
+    const stderr = `ERROR: Unable to Install “Ledger” (com.apple.dt.CoreDeviceError error 3002.)
+       NSURL = file:///tmp/Ledger.app/
+--
+This device has reached the maximum number of installed apps using a free developer profile: {(
+    "5DPZ5EKAD8.com.maciekstosio.ttiledgerapp",
+    "5W6H93822S.com.argent.runner.t5w6h93822s.uitests.xctrunner"
+)} (MIInstallerErrorDomain error 13.)`;
+    const error = new Error(
+      "Failed to install app: ERROR: Unable to Install “Ledger” (com.apple.dt.CoreDeviceError error 3002.)",
+      { cause: Object.assign(new Error("Command failed"), { stderr }) }
+    );
+    expect(freeProfileLimitMessage(error.message, { subject: "the app" })).toBeNull();
+    const message = freeProfileLimitMessage(deviceErrorText(error), {
+      subject: "the app com.maciekstosio.ttiledgerapp",
+      ownBundleIdPrefix: "com.argent.runner.t5dpz5ekad8",
+    });
+    expect(message).toContain("no slot for the app com.maciekstosio.ttiledgerapp");
+    expect(message).toContain("com.argent.runner.t5w6h93822s looks like a leftover");
   });
 });
 
