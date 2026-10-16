@@ -7,10 +7,13 @@ import type { FileInputSpec, ToolDefinition } from "@argent/registry";
 import {
   CommandTimeoutError,
   ensureLaunchDeviceReady,
+  isCrash,
   prepareLaunch,
   runLogged,
   terminateForWarmLaunch,
   terminateLaunchedApp,
+  withXctraceCrashRetry,
+  XCTRACE_EXPORT_ATTEMPTS,
   xcodeVersion,
 } from "../../utils/ios-launch-time/workflow";
 import {
@@ -22,7 +25,10 @@ import {
   truncateCpuXml,
 } from "../../utils/ios-launch-time/trace-exports";
 import {
+  coreExportFailureMessage,
+  failedCoreExport,
   simulatorLaunchWindow,
+  optionalExportCrashNote,
   simulatorProfileNote,
   stalledAtRecordingStart,
   stallsSimulatorLaunchRecording,
@@ -116,7 +122,7 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
       `Failed to record iOS App Launch: ${failureSignal.error_code}`,
   },
   description:
-    "Profile an iOS app launch with the Xcode Instruments App Launch template. Use when the launch is slow and you need to know which phases and functions run before the first frame, e.g. static initializers, dylib loading or didFinishLaunching work. Builds the app in Release and runs it once first, so the recorded launch is usually warm; iOS can still evict the app from memory. Set `allow_simulator` only when Mac-hardware timings are acceptable; on a simulator there are no phases or launchMs, the first frame comes from a system signpost, and simulatorLaunchEstimateMs is a rough estimate. cpuSamples counts differ between runs because the sampling period varies from 1 to 5 ms. Returns { launchMs, simulatorLaunchEstimateMs (simulator only), firstFrameEndMs, phases, tracePath, exports, profilerSession: { sessionId, cpuXml, cpuSamples, next }, exportErrors (when an export failed), warning (null when there is nothing to note) }. The .trace and XML exports go to <workspace>/.argent/traces/<datetime>; profilerSession holds the CPU samples up to the first frame for profiler-load and profiler-stack-query. Fails if no iPhone is connected by USB cable, the scheme cannot be resolved, the build fails, or xctrace cannot record the launch. With Xcode 26.4.x on a simulator it fails before the build, because that Xcode stalls recording launches on simulators.",
+    "Profile an iOS app launch with the Xcode Instruments App Launch template. Use when the launch is slow and you need to know which phases and functions run before the first frame, e.g. static initializers, dylib loading or didFinishLaunching work. Builds the app in Release and runs it once first, so the recorded launch is usually warm; iOS can still evict the app from memory. Set `allow_simulator` only when Mac-hardware timings are acceptable; on a simulator there are no phases or launchMs, the first frame comes from a system signpost, and simulatorLaunchEstimateMs is a rough estimate. cpuSamples counts differ between runs because the sampling period varies from 1 to 5 ms. Returns { launchMs, simulatorLaunchEstimateMs (simulator only), firstFrameEndMs, phases, tracePath, exports, profilerSession: { sessionId, cpuXml, cpuSamples, next }, exportErrors (when an optional lifecycle, dyld or signpost export failed), warning (null when there is nothing to note) }. The .trace and XML exports go to <workspace>/.argent/traces/<datetime>; profilerSession holds the CPU samples up to the first frame for profiler-load and profiler-stack-query. Fails if no iPhone is connected by USB cable, the scheme cannot be resolved, the build fails, xctrace cannot record the launch, or xctrace cannot export the trace table of contents, the CPU samples or, on an iPhone, the lifecycle phases; that error names the recorded tracePath, which opens in Instruments. Argent runs each xctrace export up to 3 times when xctrace crashes, as Xcode 26.4.1 xctrace does in most attempts; a crashed dyld or signpost export is named in warning. With Xcode 26.4.x on a simulator it fails before the build, because that Xcode stalls recording launches on simulators.",
   zodSchema: schema,
   fileInputs,
   services: () => ({}),
@@ -136,7 +142,7 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
             throw new Error(
               `${version} stalls \`xctrace record --launch\` on a simulator after "Starting recording", ` +
                 "so Argent does not record. This is a known issue with Xcode 26.4.x. " +
-                "Use Xcode 26.3 or 27, or record on a physical iPhone."
+                "Use Xcode 27, or record on a physical iPhone."
             );
           }
         },
@@ -192,7 +198,7 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
           context.simulator
             ? `xctrace stalled at "Starting recording" with ${await xcodeVersion()}. ` +
                 "Recording an app launch on a simulator is a known issue with Xcode 26.4.x. " +
-                "Use Xcode 26.3 or 27, or record on a physical iPhone. " +
+                "Use Xcode 27, or record on a physical iPhone. " +
                 `Record log: ${recordLog}`
             : `xctrace stalled after "Starting recording" and was stopped after ${RECORD_TIMEOUT_MS / 1000} s. ` +
                 `Record log: ${recordLog}`,
@@ -205,18 +211,24 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
       throw new Error(`xctrace finished without a trace at ${tracePath}; see ${recordLog}.`);
     }
     const exportErrors: Record<string, string> = {};
+    const crashedExports = new Set<string>();
     const exported: Partial<Record<"lifecycle" | "dyld" | "cpu" | "signpost", string>> = {};
     let toc = "";
     try {
-      const { stdout } = await execFileAsync(
-        "xcrun",
-        ["xctrace", "export", "--input", tracePath, "--toc"],
-        { timeout: 120_000, maxBuffer: 4 * 1024 * 1024, signal: ctx?.signal }
+      const { stdout } = await withXctraceCrashRetry(
+        () =>
+          execFileAsync("xcrun", ["xctrace", "export", "--input", tracePath, "--toc"], {
+            timeout: 120_000,
+            maxBuffer: 4 * 1024 * 1024,
+            signal: ctx?.signal,
+          }),
+        ctx?.signal
       );
       await fsp.writeFile(path.join(context.runDir, "toc.xml"), stdout);
       toc = stdout;
     } catch (error) {
       ctx?.signal?.throwIfAborted();
+      if (isCrash(error)) crashedExports.add("toc");
       exportErrors.toc = error instanceof Error ? error.message : String(error);
     }
     const xpaths = {
@@ -242,23 +254,49 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
       }
       const output = path.join(context.runDir, `${key}.xml`);
       try {
-        await runLogged(
-          "xcrun",
-          ["xctrace", "export", "--input", tracePath, "--output", output, "--xpath", xpath],
-          {
-            cwd: params.workspace_path,
-            logPath: path.join(context.runDir, `xctrace-export-${key}.log`),
-            timeoutMs: 120_000,
-            signal: ctx?.signal,
-          }
+        await withXctraceCrashRetry(
+          () =>
+            runLogged(
+              "xcrun",
+              ["xctrace", "export", "--input", tracePath, "--output", output, "--xpath", xpath],
+              {
+                cwd: params.workspace_path,
+                logPath: path.join(context.runDir, `xctrace-export-${key}.log`),
+                timeoutMs: 120_000,
+                signal: ctx?.signal,
+              }
+            ),
+          ctx?.signal
         );
         exported[key] = output;
       } catch (error) {
         ctx?.signal?.throwIfAborted();
+        if (isCrash(error)) crashedExports.add(key);
         exportErrors[key] = error instanceof Error ? error.message : String(error);
       }
     }
     ctx?.signal?.throwIfAborted();
+
+    // Without the TOC or the CPU samples the result has no launch data. Fail so
+    // the agent does not read an empty result as "nothing ran at launch".
+    // Lifecycle, dyld and signpost stay optional and are reported in exportErrors.
+    const failedExport = failedCoreExport(exportErrors, {
+      cpu: Boolean(exported.cpu),
+      lifecycle: Boolean(exported.lifecycle),
+      simulator: context.simulator,
+    });
+    if (failedExport) {
+      throw new Error(
+        coreExportFailureMessage({
+          table: failedExport,
+          reason: exportErrors[failedExport] ?? "",
+          crashed: crashedExports.has(failedExport),
+          attempts: XCTRACE_EXPORT_ATTEMPTS,
+          xcodeVersion: await xcodeVersion(),
+          tracePath,
+        })
+      );
+    }
 
     // Instruments never fills life-cycle-period on a simulator, so that is not an export error.
     if (context.simulator) delete exportErrors.lifecycle;
@@ -286,9 +324,13 @@ export const iosLaunchTimeProfileTool: ToolDefinition<z.infer<typeof schema>, un
       exportErrors.lifecycle =
         "Lifecycle export has no first-frame phase; CPU samples are not cut.";
     }
+    const crashedOptional = [...crashedExports].filter((table) => table in exportErrors);
     const notes = [
       context.warning,
       context.simulator ? simulatorProfileNote(signpostMissing) : null,
+      crashedOptional.length > 0
+        ? optionalExportCrashNote(crashedOptional, await xcodeVersion())
+        : null,
     ].filter(Boolean);
 
     let sessionId: string | null = null;

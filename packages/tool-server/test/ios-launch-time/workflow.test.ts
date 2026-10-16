@@ -8,14 +8,17 @@ import {
   appBuildArgs,
   appBuildKey,
   assertResolvedConfiguration,
+  CommandExitError,
   CommandTimeoutError,
   deviceErrorText,
   freeProfileLimitMessage,
   iosAppTargets,
+  isCrash,
   launchBuildCacheDir,
   pickScheme,
   runLogged,
   showBuildSettingsArgs,
+  withXctraceCrashRetry,
 } from "../../src/utils/ios-launch-time/workflow";
 
 let directory: string | null = null;
@@ -254,4 +257,101 @@ it("keeps launch build caches out of the app project", () => {
   expect(launchBuildCacheDir("runner", "k")).toBe(
     join(homedir(), ".argent", "build-cache", "ios-launch-time-runner", "k")
   );
+});
+
+describe("xctrace crash retry", () => {
+  const exitError = (code: number | null, signal: NodeJS.Signals | null) =>
+    new CommandExitError("xcrun failed", code, signal);
+  // execFile rejects with the same fields on a plain Error.
+  const execFileError = (code: number | null, signal: string | null) =>
+    Object.assign(new Error("Command failed: xcrun xctrace export --toc"), { code, signal });
+
+  it("classifies segfaults and other crash signals as crashes", () => {
+    expect(isCrash(exitError(139, null))).toBe(true);
+    expect(isCrash(exitError(null, "SIGSEGV"))).toBe(true);
+    expect(isCrash(exitError(null, "SIGBUS"))).toBe(true);
+    expect(isCrash(exitError(null, "SIGABRT"))).toBe(true);
+    expect(isCrash(execFileError(null, "SIGSEGV"))).toBe(true);
+    expect(isCrash(execFileError(139, null))).toBe(true);
+  });
+
+  it("does not classify timeouts, aborts or ordinary exits as crashes", () => {
+    expect(isCrash(exitError(1, null))).toBe(false);
+    expect(isCrash(execFileError(1, null))).toBe(false);
+    expect(isCrash(new CommandTimeoutError("timed out"))).toBe(false);
+    expect(isCrash(execFileError(null, "SIGTERM"))).toBe(false);
+    expect(isCrash(exitError(null, "SIGKILL"))).toBe(false);
+    expect(isCrash(Object.assign(new Error("aborted"), { name: "AbortError" }))).toBe(false);
+    expect(isCrash(Object.assign(new Error("spawn"), { code: "ENOENT" }))).toBe(false);
+    expect(isCrash(null)).toBe(false);
+  });
+
+  it("succeeds on the third attempt after two crashes", async () => {
+    let calls = 0;
+    const result = await withXctraceCrashRetry(async () => {
+      calls += 1;
+      if (calls < 3) throw exitError(null, "SIGSEGV");
+      return "toc";
+    });
+    expect(result).toBe("toc");
+    expect(calls).toBe(3);
+  });
+
+  it("gives up after three crashes", async () => {
+    let calls = 0;
+    const error = await withXctraceCrashRetry(async () => {
+      calls += 1;
+      throw exitError(139, null);
+    }).catch((e: unknown) => e);
+    expect(isCrash(error)).toBe(true);
+    expect(calls).toBe(3);
+  });
+
+  it.each([
+    ["a timeout", new CommandTimeoutError("timed out")],
+    ["an abort", Object.assign(new Error("aborted"), { name: "AbortError" })],
+    ["a plain exit 1", exitError(1, null)],
+  ])("does not retry %s", async (_label, failure) => {
+    let calls = 0;
+    const error = await withXctraceCrashRetry(async () => {
+      calls += 1;
+      throw failure;
+    }).catch((e: unknown) => e);
+    expect(error).toBe(failure);
+    expect(calls).toBe(1);
+  });
+
+  it("stops retrying once the request is cancelled", async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const work = withXctraceCrashRetry(async () => {
+      calls += 1;
+      controller.abort();
+      throw exitError(null, "SIGSEGV");
+    }, controller.signal);
+    await expect(work).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls).toBe(1);
+  });
+
+  it("exposes the signal of a logged command that crashed", async () => {
+    directory = await mkdtemp(join(tmpdir(), "argent-launch-crash-"));
+    const error = await runLogged("/bin/sh", ["-c", "kill -SEGV $$"], {
+      cwd: directory,
+      logPath: join(directory, "child.log"),
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(CommandExitError);
+    expect(error).toMatchObject({ code: null, signal: "SIGSEGV" });
+    expect((error as Error).message).toContain("was killed by SIGSEGV");
+    expect(isCrash(error)).toBe(true);
+  });
+
+  it("exposes the exit code of a logged command that failed", async () => {
+    directory = await mkdtemp(join(tmpdir(), "argent-launch-exit-"));
+    const error = await runLogged("/bin/sh", ["-c", "exit 1"], {
+      cwd: directory,
+      logPath: join(directory, "child.log"),
+    }).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: 1, signal: null });
+    expect(isCrash(error)).toBe(false);
+  });
 });

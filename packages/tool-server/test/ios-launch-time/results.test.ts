@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  coreExportFailureMessage,
+  failedCoreExport,
   launchSampleStats,
+  optionalExportCrashNote,
   simulatorLaunchWindow,
   simulatorProfileNote,
   stalledAtRecordingStart,
@@ -115,5 +118,78 @@ describe("simulatorProfileNote", () => {
     expect(simulatorProfileNote(false)).toContain("ApplicationFirstFramePresentation");
     expect(simulatorProfileNote(false)).not.toContain("is missing");
     expect(simulatorProfileNote(true)).toContain("The signpost is missing");
+  });
+});
+
+describe("failedCoreExport", () => {
+  const none = { cpu: false, lifecycle: false, simulator: false };
+
+  it("names the TOC first, then the CPU samples", () => {
+    expect(failedCoreExport({ toc: "crashed" }, none)).toBe("toc");
+    expect(failedCoreExport({ cpu: "Trace TOC has no table for this export." }, none)).toBe("cpu");
+    expect(failedCoreExport({}, none)).toBe("cpu");
+  });
+
+  it("requires the lifecycle phases on an iPhone", () => {
+    const errors = {
+      lifecycle: "xcrun was killed by SIGSEGV",
+      dyld: "xcrun was killed by SIGSEGV",
+    };
+    expect(failedCoreExport(errors, { ...none, cpu: true })).toBe("lifecycle");
+    expect(failedCoreExport({ dyld: "y" }, { ...none, cpu: true, lifecycle: true })).toBeNull();
+  });
+
+  it("does not require lifecycle on a simulator, where Instruments never records it", () => {
+    expect(
+      failedCoreExport(
+        { lifecycle: "x", dyld: "y", signpost: "z" },
+        { ...none, cpu: true, simulator: true }
+      )
+    ).toBeNull();
+  });
+});
+
+describe("coreExportFailureMessage", () => {
+  const failure = {
+    table: "toc" as const,
+    reason: "Command failed: xcrun xctrace export --toc",
+    attempts: 3,
+    xcodeVersion: "Xcode 26.4.1 Build version 17E202",
+    tracePath: "/w/.argent/traces/x/app-launch.trace",
+  };
+
+  it("names the Xcode version, the trace and the fix after repeated crashes", () => {
+    const message = coreExportFailureMessage({ ...failure, crashed: true });
+    expect(message).toContain("crashed 3 times");
+    expect(message).toContain("Xcode 26.4.1");
+    expect(message).toContain(failure.tracePath);
+    expect(message).toContain("Instruments");
+    expect(message).toContain("Seen with Xcode 26.4.1");
+    expect(message).toContain("profile with Xcode 27");
+    expect(message).not.toContain("26.3");
+  });
+
+  it("keeps the underlying error for an ordinary failure", () => {
+    const message = coreExportFailureMessage({ ...failure, table: "cpu", crashed: false });
+    expect(message).toContain("CPU samples");
+    expect(message).toContain(failure.reason);
+    expect(message).toContain(failure.tracePath);
+    expect(message).not.toContain("crashed");
+  });
+});
+
+describe("optionalExportCrashNote", () => {
+  it("is null when no optional export crashed", () => {
+    expect(optionalExportCrashNote([], "Xcode 26.4.1 Build version 17E202")).toBeNull();
+  });
+
+  it("names the crashed tables and the active Xcode", () => {
+    const note = optionalExportCrashNote(
+      ["lifecycle", "dyld"],
+      "Xcode 26.4.1 Build version 17E202"
+    );
+    expect(note).toContain("lifecycle, dyld");
+    expect(note).toContain("Xcode 26.4.1 Build version 17E202");
+    expect(note).toContain("Run the tool again");
   });
 });

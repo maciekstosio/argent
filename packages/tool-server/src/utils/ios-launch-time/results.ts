@@ -58,7 +58,7 @@ export function stalledAtRecordingStart(log: string): boolean {
 
 /**
  * True for the Xcode versions where `xctrace record --launch` on a simulator
- * stalls after "Starting recording". Verified on 26.4.x only; Xcode 27.0
+ * stalls after "Starting recording". Verified on 26.4.1 only; Xcode 27.0
  * records normally. This is not the `--device` attach deadlock that
  * `isDegraded` in capture-strategy/select.ts assumes for every version from
  * 26.4 up: that is a different capture mode, so the two bounds differ.
@@ -95,5 +95,65 @@ export function simulatorProfileNote(signpostMissing: boolean): string {
     (signpostMissing
       ? " The signpost is missing, so the CPU session covers the whole recording and is not cut."
       : "")
+  );
+}
+
+type CoreExport = "toc" | "cpu" | "lifecycle";
+
+/**
+ * The export a profile cannot do without, or null when all exported: the TOC,
+ * which locates every table; the CPU samples, which are the main output on an
+ * iPhone and the only launch data on a simulator; and on an iPhone the
+ * lifecycle phases, which give launchMs and the first-frame cut of the CPU
+ * samples. Without them the session would cover the whole recording.
+ */
+export function failedCoreExport(
+  exportErrors: Record<string, string>,
+  exported: { cpu: boolean; lifecycle: boolean; simulator: boolean }
+): CoreExport | null {
+  if (exportErrors.toc !== undefined) return "toc";
+  if (!exported.cpu) return "cpu";
+  return exported.simulator || exported.lifecycle ? null : "lifecycle";
+}
+
+const CORE_EXPORT_NAMES: Record<CoreExport, string> = {
+  toc: "table of contents",
+  cpu: "CPU samples",
+  lifecycle: "lifecycle phases",
+};
+
+/** The error a profile throws when {@link failedCoreExport} names an export. */
+export function coreExportFailureMessage(failure: {
+  table: CoreExport;
+  reason: string;
+  crashed: boolean;
+  attempts: number;
+  xcodeVersion: string;
+  tracePath: string;
+}): string {
+  const what = CORE_EXPORT_NAMES[failure.table];
+  return failure.crashed
+    ? `xctrace export of the ${what} crashed ${failure.attempts} times in a row with ${failure.xcodeVersion}. ` +
+        `The trace was recorded: ${failure.tracePath}. Open it in Instruments to inspect the launch. ` +
+        `${XCTRACE_EXPORT_CRASH_KNOWN} Run the tool again, or profile with Xcode 27.`
+    : `xctrace could not export the ${what}, so there is no launch data. ` +
+        `The trace was recorded: ${failure.tracePath}. Open it in Instruments to inspect the launch.\n` +
+        failure.reason;
+}
+
+// Only what was verified: other Xcode versions were not tried.
+const XCTRACE_EXPORT_CRASH_KNOWN =
+  "Seen with Xcode 26.4.1, where xctrace export crashes in most attempts; " +
+  "Xcode 27.0 exports the same traces without crashing.";
+
+/**
+ * The note a profile adds when an optional export (lifecycle, dyld, signpost)
+ * still crashed after its retries, so the missing data has a stated cause.
+ */
+export function optionalExportCrashNote(tables: string[], xcodeVersion: string): string | null {
+  if (tables.length === 0) return null;
+  return (
+    `xctrace export of ${tables.join(", ")} crashed with ${xcodeVersion}, so that data is missing. ` +
+    `${XCTRACE_EXPORT_CRASH_KNOWN} Run the tool again for a complete result.`
   );
 }

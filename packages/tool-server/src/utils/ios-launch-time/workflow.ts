@@ -158,6 +158,64 @@ export class CommandTimeoutError extends Error {
   }
 }
 
+/**
+ * Thrown by {@link runLogged} when the command exits with a non-zero code or is
+ * killed by a signal. `code` and `signal` match the fields of an execFile error.
+ */
+export class CommandExitError extends Error {
+  constructor(
+    message: string,
+    readonly code: number | null,
+    readonly signal: NodeJS.Signals | null
+  ) {
+    super(message);
+    this.name = "CommandExitError";
+  }
+}
+
+// Exit codes a shell reports for a process killed by SIGABRT, SIGBUS or SIGSEGV (128 + signal).
+const CRASH_EXIT_CODES = new Set([134, 138, 139]);
+const CRASH_SIGNALS = new Set(["SIGABRT", "SIGBUS", "SIGSEGV"]);
+
+/**
+ * True when a failed runLogged or execFile command crashed, not when it timed
+ * out, was cancelled or exited with an ordinary error code.
+ */
+export function isCrash(error: unknown): boolean {
+  if (error instanceof CommandTimeoutError) return false;
+  const { code, signal, name } = (error ?? {}) as {
+    code?: unknown;
+    signal?: unknown;
+    name?: unknown;
+  };
+  if (name === "AbortError") return false;
+  return (
+    (typeof code === "number" && CRASH_EXIT_CODES.has(code)) ||
+    (typeof signal === "string" && CRASH_SIGNALS.has(signal))
+  );
+}
+
+export const XCTRACE_EXPORT_ATTEMPTS = 3;
+
+/**
+ * Runs an `xctrace export` again when xctrace crashes. Xcode 26.4.1 xctrace
+ * intermittently segfaults while it loads a valid trace, and a later attempt
+ * on the same trace succeeds. Use it for exports only, never for a recording.
+ */
+export async function withXctraceCrashRetry<T>(
+  run: () => Promise<T>,
+  signal?: AbortSignal
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    signal?.throwIfAborted();
+    try {
+      return await run();
+    } catch (error) {
+      if (attempt >= XCTRACE_EXPORT_ATTEMPTS || !isCrash(error)) throw error;
+    }
+  }
+}
+
 // How long an aborted command gets to exit on SIGTERM before SIGKILL.
 const ABORT_KILL_GRACE_MS = 5_000;
 
@@ -205,9 +263,14 @@ export async function runLogged(
     if (child.pid) signalGroup(child.pid, "SIGKILL");
   }, timeoutMs);
   try {
-    const code = await new Promise<number>((resolve, reject) => {
+    const { code, signal } = await new Promise<{
+      code: number | null;
+      signal: NodeJS.Signals | null;
+    }>((resolve, reject) => {
       child.once("error", reject);
-      child.once("close", (exitCode) => resolve(exitCode ?? -1));
+      child.once("close", (exitCode, exitSignal) =>
+        resolve({ code: exitCode, signal: exitSignal })
+      );
     });
     options.signal?.throwIfAborted();
     if (timedOut) {
@@ -216,7 +279,11 @@ export async function runLogged(
       );
     }
     if (code !== 0) {
-      throw new Error(`${command} exited with ${code}:\n${errorText(tail, options.logPath)}`);
+      throw new CommandExitError(
+        `${command} ${signal ? `was killed by ${signal}` : `exited with ${code}`}:\n${errorText(tail, options.logPath)}`,
+        code,
+        signal
+      );
     }
   } finally {
     clearTimeout(timer);

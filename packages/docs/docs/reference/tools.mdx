@@ -159,14 +159,23 @@ If Argent already has an active UI test runner on the selected iPhone, `ios-laun
 - `simulatorLaunchEstimateMs`: on a simulator only, the time from the first dyld activity to the first frame. It is a rough estimate.
 - `warning`: notes about the run. It is `null` when there is nothing to note.
 - `tracePath` and `exports`: the `.trace` bundle and the XML exports. The exports are the lifecycle and dyld tables, and on a simulator also the `os-signpost` table.
-- `exportErrors`: the exports that failed or that the trace does not contain, with the reason. Argent omits this field when all exports succeed.
+- `exportErrors`: the lifecycle, dyld and signpost exports that failed or that the trace does not contain, with the reason. Argent omits this field when all exports succeed.
 - `profilerSession`: a native profiler session with the CPU samples up to the first frame. It contains `sessionId`, the path of its XML file in `cpuXml`, the number of samples in `cpuSamples` and the next tool calls in `next`.
 
 On a simulator, Instruments does not record lifecycle phases, so `phases` is empty. Argent adds the `os_signpost` instrument and ends the launch at the `ApplicationFirstFramePresentation` signpost that the system emits for the app. If the signpost is missing, the CPU session covers the whole recording and is not cut. Timings of a recording on a simulator are about two times slower than an uninstrumented launch and reflect Mac hardware. Use them for relative CPU analysis only.
 
 The sampling period of the App Launch template varies between 1 ms and 5 ms, so `profilerSession.cpuSamples` counts are not comparable between runs.
 
-Xcode 26.4.x has a known issue: `xctrace record --launch` on a simulator stalls after `Starting recording`. When the active Xcode is 26.4.x and the selected device is a simulator, `ios-launch-time-profile` stops before the build and reports the issue. Use Xcode 26.3 or 27, or record on a physical iPhone.
+Xcode 26.4.x has a known issue: `xctrace record --launch` on a simulator stalls after `Starting recording`. When the active Xcode is 26.4.x and the selected device is a simulator, `ios-launch-time-profile` stops before the build and reports the issue. Use Xcode 27, or record on a physical iPhone.
+
+Argent exports the tables of the trace with `xctrace export`. With Xcode 26.4.1, `xctrace export` crashes in most attempts on a valid trace. Xcode 27.0 exports the same traces without a crash. When `xctrace export` crashes, Argent runs the export again, up to 3 times in total. Argent does not run the export again after a timeout or a usual error.
+
+The tool needs the table of contents of the trace and the CPU samples. On a physical iPhone, the tool also needs the lifecycle phases, because they give `launchMs` and the first-frame cut of the CPU samples:
+
+- When one of these exports fails, the tool fails and does not return an empty result. The error gives the path of the recorded trace.
+- When the dyld or signpost export crashes, the tool returns the result without that data. The `warning` names the tables that crashed.
+
+Open the trace in Instruments, run the tool again, or use Xcode 27.
 
 If a recording stalls after `Starting recording` on another Xcode or on an iPhone, Argent stops it after 180 seconds and reports the record log. When you cancel the tool, Argent stops `xctrace` in at most 5 seconds. After a failed or cancelled recording, Argent tries to terminate the app for at most 15 seconds.
 
